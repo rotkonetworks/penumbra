@@ -988,17 +988,15 @@ impl Storage {
         .await?
     }
 
+    /// Return all notes that are eligible for voting at `votable_at_height`.
+    /// If an `address_index` is provided, only notes from within that subaccount
+    /// will be returned; otherwise, all voting notes across all subaccounts will
+    /// returned. If you want just the main account, then set `Some(0)` in the caller.
     pub async fn notes_for_voting(
         &self,
         address_index: Option<penumbra_sdk_keys::keys::AddressIndex>,
         votable_at_height: u64,
     ) -> anyhow::Result<Vec<(SpendableNoteRecord, IdentityKey)>> {
-        // If set, only return notes with the specified address index.
-        // crypto.AddressIndex address_index = 3;
-        let address_clause = address_index
-            .map(|d| format!("x'{}'", hex::encode(d.to_bytes())))
-            .unwrap_or_else(|| "address_index".to_string());
-
         let pool = self.pool.clone();
 
         spawn_blocking(move || {
@@ -1021,8 +1019,7 @@ impl Storage {
                     FROM
                         notes JOIN spendable_notes ON notes.note_commitment = spendable_notes.note_commitment
                     WHERE
-                        spendable_notes.address_index IS {address_clause}
-                        AND notes.asset_id IN (
+                        notes.asset_id IN (
                             SELECT asset_id FROM assets WHERE denom LIKE '_delegation\\_%' ESCAPE '\\'
                         )
                         AND ((spendable_notes.height_spent IS NULL) OR (spendable_notes.height_spent > {votable_at_height}))
@@ -1036,6 +1033,10 @@ impl Storage {
             // do it this way; if it becomes slow, we can do it better
             let mut results = Vec::new();
             for record in spendable_note_records {
+                // Skip notes that don't match the account index, if declared.
+                if matches!(address_index, Some(a) if a.account != record.address_index.account) {
+                      continue;
+                }
                 let asset_id = record.note.asset_id().to_bytes().to_vec();
                 let denom: String = dbtx.query_row_and_then(
                     "SELECT denom FROM assets WHERE asset_id = ?1",
@@ -1223,6 +1224,26 @@ impl Storage {
                 .execute(
                     "UPDATE positions SET (position_state) = ?1 WHERE position_id = ?2",
                     (position_state, position_id),
+                )
+                .map_err(anyhow::Error::from)
+        })
+        .await??;
+
+        Ok(())
+    }
+
+    pub async fn update_position_with_account(
+        &self,
+        position_id: position::Id,
+        account: u32,
+    ) -> anyhow::Result<()> {
+        let pool = self.pool.clone();
+
+        spawn_blocking(move || {
+            pool.get()?
+                .execute(
+                    "UPDATE positions SET (account) = ?1 WHERE position_id = ?2",
+                    (i64::from(account), position_id.0),
                 )
                 .map_err(anyhow::Error::from)
         })
@@ -1689,33 +1710,30 @@ impl Storage {
         &self,
         position_state: Option<State>,
         trading_pair: Option<TradingPair>,
+        address_index: Option<AddressIndex>,
     ) -> anyhow::Result<Vec<position::Id>> {
         let pool = self.pool.clone();
 
         let state_clause = match position_state {
             Some(state) => format!("position_state = \"{}\"", state),
-            None => "".to_string(),
+            None => "true".to_string(),
         };
 
         let pair_clause = match trading_pair {
             Some(pair) => format!("trading_pair = \"{}\"", pair),
-            None => "".to_string(),
+            None => "true".to_string(),
+        };
+
+        let account_clause = match address_index {
+            Some(index) => format!("account = {}", index.account),
+            None => "true".to_string(),
         };
 
         spawn_blocking(move || {
-            let mut q = "SELECT position_id FROM positions".to_string();
-            match (position_state.is_some(), trading_pair.is_some()) {
-                (true, true) => {
-                    q = q + " WHERE " + &state_clause + " AND " + &pair_clause;
-                }
-                (true, false) => {
-                    q = q + " WHERE " + &state_clause;
-                }
-                (false, true) => {
-                    q = q + " WHERE " + &pair_clause;
-                }
-                (false, false) => (),
-            };
+            let q = format!(
+                "SELECT position_id FROM positions WHERE {} AND {} AND {}",
+                state_clause, pair_clause, account_clause
+            );
 
             pool.get()?
                 .prepare_cached(&q)?

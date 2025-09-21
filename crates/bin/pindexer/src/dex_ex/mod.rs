@@ -747,6 +747,10 @@ impl Events {
         let pair_2_1 = pair_1_2.flip();
         let input_amount = f64::from(input.amount);
         let output_amount = f64::from(output.amount);
+        if input_amount == 0.0 && output_amount == 0.0 {
+            tracing::warn!(?input, ?output, "ignoring trace with 0 input and output");
+            return;
+        }
         let price_1_2 = output_amount / input_amount;
         let candle_1_2 = Candle::point(price_1_2, input_amount);
         let candle_2_1 = Candle::point(1.0 / price_1_2, output_amount);
@@ -821,7 +825,7 @@ impl Events {
         }
     }
 
-    pub fn extract(block: &BlockEvents) -> anyhow::Result<Self> {
+    pub fn extract(block: &BlockEvents, ignore_arb_executions: bool) -> anyhow::Result<Self> {
         let mut out = Self::new();
         out.height = block.height() as i32;
 
@@ -914,7 +918,9 @@ impl Events {
                 }
                 out.batch_swaps.push(e);
             } else if let Ok(e) = EventArbExecution::try_from_event(&event.event) {
-                out.with_swap_execution(&e.swap_execution);
+                if !ignore_arb_executions {
+                    out.with_swap_execution(&e.swap_execution);
+                }
             }
         }
         Ok(out)
@@ -970,13 +976,15 @@ impl Events {
 pub struct Component {
     denom: asset::Id,
     min_liquidity: f64,
+    ignore_arb_executions: bool,
 }
 
 impl Component {
-    pub fn new(denom: asset::Id, min_liquidity: f64) -> Self {
+    pub fn new(denom: asset::Id, min_liquidity: f64, ignore_arb_executions: bool) -> Self {
         Self {
             denom,
             min_liquidity,
+            ignore_arb_executions,
         }
     }
 
@@ -1477,7 +1485,18 @@ impl AppView for Component {
     }
 
     fn version(&self) -> Version {
-        Version::with_major(1)
+        let hash: [u8; 32] = blake2b_simd::Params::default()
+            .personal(b"option_hash")
+            .hash_length(32)
+            .to_state()
+            .update(&self.denom.to_bytes())
+            .update(&self.min_liquidity.to_le_bytes())
+            .update(&[u8::from(self.ignore_arb_executions)])
+            .finalize()
+            .as_bytes()
+            .try_into()
+            .expect("Impossible 000-001: expected 32 byte hash");
+        Version::with_major(2).with_option_hash(hash)
     }
 
     async fn reset(&self, dbtx: &mut PgTransaction) -> Result<(), anyhow::Error> {
@@ -1505,7 +1524,7 @@ impl AppView for Component {
         let mut snapshots = HashMap::new();
         let mut last_time = None;
         for block in batch.events_by_block() {
-            let mut events = Events::extract(&block)?;
+            let mut events = Events::extract(&block, self.ignore_arb_executions)?;
             let time = events
                 .time
                 .expect(&format!("no block root event at height {}", block.height()));
