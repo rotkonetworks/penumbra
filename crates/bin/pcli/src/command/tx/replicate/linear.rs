@@ -19,10 +19,10 @@ pub struct Linear {
     /// The pair to provide liquidity for.
     pub pair: DirectedUnitPair,
 
-    /// The target amount of liquidity (in asset 2) to provide.
+    /// The amount of liquidity to provide (either asset 1 or asset 2).
     ///
-    /// Note that the actual amount of liquidity provided will be a mix of
-    /// asset 1 and asset 2, depending on the current price.
+    /// You can provide whichever asset you have. The tool will automatically
+    /// convert and distribute it across positions based on the price range.
     pub input: Value,
 
     /// The lower bound of the price range.
@@ -69,8 +69,6 @@ pub struct Linear {
 
 impl Linear {
     pub async fn exec(&self, app: &mut App) -> anyhow::Result<()> {
-        self.validate()?;
-
         let pair = self.pair.clone();
 
         tracing::debug!(start = ?pair.start.base());
@@ -87,6 +85,8 @@ impl Linear {
         let current_price =
             super::process_price_or_fetch_spread(app, self.current_price, self.pair.clone())
                 .await?;
+
+        self.validate(current_price)?;
 
         tracing::debug!(?self);
         tracing::debug!(?current_price);
@@ -177,38 +177,63 @@ impl Linear {
         current_price: f64,
         input: Value,
     ) -> Vec<Position> {
-        // The step width is num_positions-1 because it's between the endpoints
-        // |---|---|---|---|
-        // 0   1   2   3   4
-        //   0   1   2   3
         let step_width = (self.upper_price - self.lower_price) / (self.num_positions - 1) as f64;
 
-        // We are treating asset 2 as the numeraire and want to have an even spread
-        // of asset 2 value across all positions.
-        let total_input = input.amount.value() as f64;
-        let asset_2_per_position = total_input / self.num_positions as f64;
+        // First pass: count how many positions need each asset
+        let mut positions_needing_asset_1 = 0u32;
+        let mut positions_needing_asset_2 = 0u32;
+
+        for i in 0..self.num_positions {
+            let position_price = self.lower_price + step_width * i as f64;
+            if position_price >= current_price {
+                positions_needing_asset_1 += 1;
+            } else {
+                positions_needing_asset_2 += 1;
+            }
+        }
+
+        // Determine which asset user provided and how to distribute it
+        let user_provided_asset_1 = input.asset_id == self.pair.start.id();
+        let user_provided_asset_2 = input.asset_id == self.pair.end.id();
+
+        // Calculate per-position amount for the provided asset
+        let (amount_per_position_r1, amount_per_position_r2) = if user_provided_asset_1 {
+            // User provided asset 1: distribute only to positions that need it
+            let amount_per = if positions_needing_asset_1 > 0 {
+                input.amount.value() / positions_needing_asset_1 as u128
+            } else {
+                0
+            };
+            (amount_per, 0u128)
+        } else if user_provided_asset_2 {
+            // User provided asset 2: distribute only to positions that need it
+            let amount_per = if positions_needing_asset_2 > 0 {
+                input.amount.value() / positions_needing_asset_2 as u128
+            } else {
+                0
+            };
+            (0u128, amount_per)
+        } else {
+            // Should never happen (caught by validation), but handle gracefully
+            (0u128, 0u128)
+        };
 
         tracing::debug!(
             ?current_price,
             ?step_width,
-            ?total_input,
-            ?asset_2_per_position
+            ?positions_needing_asset_1,
+            ?positions_needing_asset_2,
+            ?amount_per_position_r1,
+            ?amount_per_position_r2,
+            provided_asset = ?input.asset_id,
         );
 
         let mut positions = vec![];
-
         let dtp = self.pair.into_directed_trading_pair();
 
         for i in 0..self.num_positions {
             let position_price = self.lower_price + step_width * i as f64;
 
-            // Cross-multiply exponents and prices for trading function coefficients
-            //
-            // We want to write
-            // p = EndUnit * price
-            // q = StartUnit
-            // However, if EndUnit is too small, it might not round correctly after multiplying by price
-            // To handle this, conditionally apply a scaling factor if the EndUnit amount is too small.
             let scale = if self.pair.end.unit_amount().value() < 1_000_000 {
                 1_000_000
             } else {
@@ -220,37 +245,31 @@ impl Linear {
             );
             let q = self.pair.start.unit_amount() * Amount::from(scale);
 
-            // Compute reserves
-            let reserves = if position_price < current_price {
-                // If the position's price is _less_ than the current price, fund it with asset 2
-                // so the position isn't immediately arbitraged.
+            // Fund position based on its price relative to current
+            let reserves = if position_price >= current_price {
+                // Position at/above current: needs asset 1
                 Reserves {
-                    r1: Amount::zero(),
-                    r2: Amount::from(asset_2_per_position as u128),
+                    r1: Amount::from(amount_per_position_r1),
+                    r2: Amount::zero(),
                 }
             } else {
-                // If the position's price is _greater_ than the current price, fund it with
-                // an equivalent amount of asset 1 as the target per-position amount of asset 2.
-                let asset_1 = asset_2_per_position / position_price;
+                // Position below current: needs asset 2
                 Reserves {
-                    r1: Amount::from(asset_1 as u128),
-                    r2: Amount::zero(),
+                    r1: Amount::zero(),
+                    r2: Amount::from(amount_per_position_r2),
                 }
             };
 
             let position = Position::new(&mut rng, dtp, self.fee_bps, p, q, reserves);
-
             positions.push(position);
         }
 
         positions
     }
 
-    fn validate(&self) -> anyhow::Result<()> {
-        if self.input.asset_id != self.pair.end.id() {
-            anyhow::bail!("liquidity target is specified in terms of asset 2 but provided input is for a different asset")
-        } else if self.input.amount == 0u64.into() {
-            anyhow::bail!("the quantity of liquidity supplied must be non-zero.",)
+    fn validate(&self, current_price: f64) -> anyhow::Result<()> {
+        if self.input.amount == 0u64.into() {
+            anyhow::bail!("the quantity of liquidity supplied must be non-zero")
         } else if self.fee_bps > 5000 {
             anyhow::bail!("the maximum fee is 5000bps (50%)")
         } else if self.current_price.is_some()
@@ -261,9 +280,77 @@ impl Linear {
             anyhow::bail!("the lower price must be less than the upper price")
         } else if self.num_positions <= 2 {
             anyhow::bail!("the number of positions must be greater than 2")
-        } else {
-            Ok(())
         }
+
+        // Accept either asset from the pair
+        if self.input.asset_id != self.pair.start.id() && self.input.asset_id != self.pair.end.id() {
+            anyhow::bail!(
+                "provided asset must be part of trading pair {}:{}",
+                self.pair.start,
+                self.pair.end
+            )
+        }
+
+        // Validate that the provided asset matches what the price range actually needs
+        let step_width = (self.upper_price - self.lower_price) / (self.num_positions - 1) as f64;
+        let mut positions_needing_asset_1 = 0u32;
+        let mut positions_needing_asset_2 = 0u32;
+
+        for i in 0..self.num_positions {
+            let position_price = self.lower_price + step_width * i as f64;
+            if position_price >= current_price {
+                positions_needing_asset_1 += 1;
+            } else {
+                positions_needing_asset_2 += 1;
+            }
+        }
+
+        let user_provided_asset_1 = self.input.asset_id == self.pair.start.id();
+
+        // Warn if user provided asset but no positions need it
+        if user_provided_asset_1 && positions_needing_asset_1 == 0 {
+            anyhow::bail!(
+                "You provided {} (asset 1) but all {} positions are below current price {:.8}.\n\
+                \n\
+                Your range {:.8}-{:.8} is entirely below current, so all positions need {} (asset 2).\n\
+                \n\
+                Either:\n\
+                1. Provide {} instead of {}\n\
+                2. Adjust your range to be above current price\n\
+                3. Use a range spanning current price (requires both assets)",
+                self.pair.start,
+                self.num_positions,
+                current_price,
+                self.lower_price,
+                self.upper_price,
+                self.pair.end,
+                self.pair.end,
+                self.pair.start
+            )
+        }
+
+        if !user_provided_asset_1 && positions_needing_asset_2 == 0 {
+            anyhow::bail!(
+                "You provided {} (asset 2) but all {} positions are at/above current price {:.8}.\n\
+                \n\
+                Your range {:.8}-{:.8} is entirely at/above current, so all positions need {} (asset 1).\n\
+                \n\
+                Either:\n\
+                1. Provide {} instead of {}\n\
+                2. Adjust your range to be below current price\n\
+                3. Use a range spanning current price (requires both assets)",
+                self.pair.end,
+                self.num_positions,
+                current_price,
+                self.lower_price,
+                self.upper_price,
+                self.pair.start,
+                self.pair.start,
+                self.pair.end
+            )
+        }
+
+        Ok(())
     }
 }
 
@@ -321,12 +408,73 @@ mod tests {
         let gm_id = params.pair.end.id();
 
         assert_eq!(positions.len(), 5);
-        // These should be all GM
+        // With new logic: user provided gm (asset 2), so only positions below current get funded
+        // Positions 0,1,2 are below current (1.8, 1.9, 2.0 < 2.05): get gm
+        // Positions 3,4 are at/above current (2.1, 2.2 >= 2.05): get nothing (need um)
         assert_eq!(positions[0].reserves_for(um_id).unwrap(), 0u64.into());
         assert_eq!(positions[1].reserves_for(um_id).unwrap(), 0u64.into());
         assert_eq!(positions[2].reserves_for(um_id).unwrap(), 0u64.into());
-        // These should be all UM
+        assert_eq!(positions[3].reserves_for(um_id).unwrap(), 0u64.into());
+        assert_eq!(positions[4].reserves_for(um_id).unwrap(), 0u64.into());
+
+        // Positions below current have gm
+        assert!(positions[0].reserves_for(gm_id).unwrap() > 0u64.into());
+        assert!(positions[1].reserves_for(gm_id).unwrap() > 0u64.into());
+        assert!(positions[2].reserves_for(gm_id).unwrap() > 0u64.into());
+        // Positions at/above current have no gm (need um which user didn't provide)
         assert_eq!(positions[3].reserves_for(gm_id).unwrap(), 0u64.into());
         assert_eq!(positions[4].reserves_for(gm_id).unwrap(), 0u64.into());
+    }
+
+    #[test]
+    fn test_asset_1_distribution() {
+        // Test the original failing use case: providing asset 1 for range above current
+        let params = Linear {
+            pair: "um:uusdc".parse().unwrap(),
+            input: "29000um".parse().unwrap(),
+            lower_price: 0.0497,
+            upper_price: 0.3,
+            fee_bps: 150,
+            num_positions: 100,
+            current_price: Some(0.0496790),
+            close_on_fill: false,
+            yes: false,
+            source: 0,
+        };
+
+        let mut rng = ChaCha20Rng::seed_from_u64(54321);
+        let positions = params.build_positions(
+            &mut rng,
+            params.current_price.unwrap(),
+            params.input.clone(),
+        );
+
+        let um_id = params.pair.start.id();
+        let usdc_id = params.pair.end.id();
+
+        assert_eq!(positions.len(), 100);
+
+        // All positions should be at/above current (0.0497 >= 0.0496790)
+        // So all should get um, none should get usdc
+        let total_um: u128 = positions
+            .iter()
+            .map(|p| p.reserves_for(um_id).unwrap().value())
+            .sum();
+        let total_usdc: u128 = positions
+            .iter()
+            .map(|p| p.reserves_for(usdc_id).unwrap().value())
+            .sum();
+
+        // Each position should get 29000/100 = 290 um
+        assert_eq!(total_um, 29000);
+        assert_eq!(total_usdc, 0);
+
+        // Check individual position amounts
+        for position in &positions {
+            let um_amount = position.reserves_for(um_id).unwrap().value();
+            let usdc_amount = position.reserves_for(usdc_id).unwrap().value();
+            assert_eq!(um_amount, 290); // 29000 / 100
+            assert_eq!(usdc_amount, 0);
+        }
     }
 }
