@@ -22,6 +22,7 @@ pub mod warning;
 
 mod dex_utils;
 mod network;
+pub mod qr;
 mod terminal;
 mod transaction_view_ext;
 
@@ -39,6 +40,8 @@ pub struct App {
     pub config: PcliConfig,
     /// If present, save the transaction here instead of broadcasting it.
     pub save_transaction_here_instead: Option<PathBuf>,
+    /// If true, export transaction plan as QR code for airgap signing
+    pub qr_export_mode: bool,
 }
 
 impl App {

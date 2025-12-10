@@ -190,6 +190,7 @@ impl Opt {
             governance_custody,
             config,
             save_transaction_here_instead: None,
+            qr_export_mode: false,
         };
         Ok((app, self.cmd))
     }

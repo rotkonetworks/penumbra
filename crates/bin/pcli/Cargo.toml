@@ -106,6 +106,8 @@ tonic = {workspace = true, features = ["tls-webpki-roots", "tls"]}
 tower = {workspace = true, features = ["full"]}
 termion = {workspace = true}
 tracing = {workspace = true}
+qrcode = { version = "0.14", default-features = false }
+reqwest = { version = "0.12", features = ["json"] }
 tracing-subscriber = {workspace = true, features = ["env-filter", "ansi"]}
 url = {workspace = true, features = ["serde"]}
 

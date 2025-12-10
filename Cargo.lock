@@ -4877,10 +4877,12 @@ dependencies = [
  "penumbra-sdk-wallet",
  "pin-project",
  "predicates 2.1.5",
+ "qrcode",
  "rand",
  "rand_chacha",
  "rand_core",
  "regex",
+ "reqwest 0.12.9",
  "rpassword",
  "rustls 0.23.21",
  "serde",
@@ -7205,6 +7207,12 @@ checksum = "cc2f1e56baa61e93533aebc21af4d2134b70f66275e0fcdf3cbe43d77ff7e8fc"
 dependencies = [
  "prost 0.13.4",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quanta"

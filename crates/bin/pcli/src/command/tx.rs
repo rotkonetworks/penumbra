@@ -87,6 +87,7 @@ use tonic::transport::{Channel, ClientTlsConfig};
 use url::Url;
 
 use crate::command::tx::auction::AuctionCmd;
+use crate::network::OfflineBundle;
 use crate::App;
 use clap::Parser;
 
@@ -95,6 +96,7 @@ mod liquidity_position;
 mod lqt_vote;
 mod proposal;
 mod replicate;
+mod schema;
 
 /// The planner can fail to build a large transaction, so
 /// pcli splits apart the number of positions to close/withdraw
@@ -106,6 +108,17 @@ pub struct TxCmdWithOptions {
     /// If present, a file to save the transaction to instead of broadcasting it
     #[clap(long)]
     pub offline: Option<PathBuf>,
+
+    /// Export transaction for airgap signing (creates pending_tx.bundle.json)
+    /// Small transactions show QR; large ones should be transferred via wormhole
+    #[clap(long, conflicts_with = "offline")]
+    pub qr: bool,
+
+    /// Complete a previously exported transaction with authorization from airgap device
+    /// Provide the bundle path and ensure pending_tx.auth.bin exists with the signed auth data
+    #[clap(long, conflicts_with_all = &["offline", "qr"])]
+    pub qr_complete: Option<PathBuf>,
+
     #[clap(subcommand)]
     pub cmd: TxCmd,
 }
@@ -113,12 +126,78 @@ pub struct TxCmdWithOptions {
 impl TxCmdWithOptions {
     /// Determine if this command requires a network sync before it executes.
     pub fn offline(&self) -> bool {
-        self.cmd.offline()
+        // QR export mode still needs network for witness data
+        // Only QR complete mode is fully offline
+        self.qr_complete.is_some() || self.cmd.offline()
     }
 
     pub async fn exec(&self, app: &mut App) -> Result<()> {
+        // Handle QR completion mode - reads auth data and broadcasts
+        if let Some(plan_path) = &self.qr_complete {
+            return self.complete_qr_transaction(app, plan_path).await;
+        }
+
         app.save_transaction_here_instead = self.offline.clone();
+
+        // Set QR mode flag on app
+        if self.qr {
+            app.qr_export_mode = true;
+        }
+
         self.cmd.exec(app).await
+    }
+
+    /// Complete a transaction that was previously exported for offline signing.
+    async fn complete_qr_transaction(&self, app: &mut App, bundle_path: &PathBuf) -> Result<()> {
+        use penumbra_sdk_proto::Message;
+        use penumbra_sdk_transaction::AuthorizationData;
+
+        println!("loading offline bundle from {}...", bundle_path.display());
+
+        // Load bundle (supports both new .bundle.json and legacy separate files)
+        let (plan, witness_data) = if bundle_path.to_string_lossy().ends_with(".bundle.json") {
+            let bundle = OfflineBundle::load(bundle_path)
+                .with_context(|| format!("failed to load bundle: {}", bundle_path.display()))?;
+            (bundle.plan, bundle.witness)
+        } else {
+            use penumbra_sdk_transaction::{TransactionPlan, WitnessData};
+
+            let plan_bytes = std::fs::read(bundle_path)
+                .with_context(|| format!("failed to read: {}", bundle_path.display()))?;
+            let plan: TransactionPlan = serde_json::from_slice(&plan_bytes)
+                .context("failed to parse transaction plan")?;
+
+            let witness_path = bundle_path.with_extension("witness.json");
+            let witness_bytes = std::fs::read(&witness_path)
+                .with_context(|| format!("failed to read: {}", witness_path.display()))?;
+            let witness_data: WitnessData = serde_json::from_slice(&witness_bytes)
+                .context("failed to parse witness data")?;
+
+            (plan, witness_data)
+        };
+
+        // Load authorization from signer
+        let auth_path = bundle_path.with_extension("auth.bin");
+        let auth_bytes = std::fs::read(&auth_path)
+            .with_context(|| format!("failed to read auth from: {}", auth_path.display()))?;
+
+        let auth_proto = penumbra_sdk_proto::core::transaction::v1::AuthorizationData::decode(
+            auth_bytes.as_slice(),
+        )
+        .context("failed to decode authorization data")?;
+
+        let auth_data: AuthorizationData = auth_proto
+            .try_into()
+            .context("invalid authorization data")?;
+
+        println!("building transaction...");
+        let transaction = plan.build(&app.config.full_viewing_key, &witness_data, &auth_data)?;
+
+        println!("broadcasting...");
+        let tx_id = app.submit_transaction(transaction).await?;
+        println!("confirmed: {}", tx_id);
+
+        Ok(())
     }
 }
 
@@ -329,6 +408,45 @@ pub enum TxCmd {
     },
     #[clap(display_order = 700)]
     LqtVote(LqtVoteCmd),
+    /// Generate action schema QR for airgap signers (like Zigner)
+    #[clap(display_order = 800)]
+    Schema {
+        /// Output as JSON file instead of QR code
+        #[clap(long)]
+        json: Option<PathBuf>,
+        /// Output raw hex bytes instead of QR code
+        #[clap(long)]
+        hex: bool,
+        /// Verify and display a schema from hex payload (for testing)
+        #[clap(long, conflicts_with_all = &["json", "hex", "merkle"])]
+        verify: Option<String>,
+        /// Output merkleized digest (compact ~200 bytes vs ~10KB full schema)
+        /// Zigner stores only the merkle root and verifies proofs per-transaction
+        #[clap(long, conflicts_with_all = &["json", "verify"])]
+        merkle: bool,
+        /// Generate merkle proof for specific action field number
+        #[clap(long, requires = "merkle")]
+        proof_for: Option<u32>,
+    },
+    /// Generate asset registry QR for airgap signers (from prax-registry)
+    #[clap(display_order = 810)]
+    Registry {
+        /// Output as hex instead of QR
+        #[clap(long)]
+        hex: bool,
+        /// Verify and display a registry from hex payload
+        #[clap(long, conflicts_with = "hex")]
+        verify: Option<String>,
+        /// Chain ID to fetch registry for (default: penumbra-1)
+        #[clap(long, default_value = "penumbra-1")]
+        chain: String,
+        /// Custom registry URL (default: prax-wallet/registry on GitHub)
+        #[clap(long)]
+        url: Option<String>,
+        /// Show asset list
+        #[clap(long)]
+        list: bool,
+    },
 }
 
 /// Vote on a governance proposal.
@@ -387,10 +505,188 @@ impl TxCmd {
             TxCmd::Broadcast { .. } => false,
             TxCmd::RegisterForwardingAccount { .. } => false,
             TxCmd::LqtVote(cmd) => cmd.offline(),
+            TxCmd::Schema { .. } => true, // No network needed
+            TxCmd::Registry { verify: Some(_), .. } => true, // Verify is offline
+            TxCmd::Registry { .. } => false, // Fetching needs network
         }
     }
 
     pub async fn exec(&self, app: &mut App) -> Result<()> {
+        // Handle fully offline commands first (no network needed at all)
+        if let TxCmd::Schema { json, hex, verify, merkle, proof_for } = self {
+            // Verify mode - decode and display existing schema
+            if let Some(hex_payload) = verify {
+                // Try merkle digest first, then full schema
+                if let Ok(digest) = schema::decode_digest_qr(hex_payload) {
+                    println!("Merkle digest verification successful!");
+                    println!();
+                    schema::display_digest(&digest);
+                } else {
+                    let schema = schema::decode_schema_qr(hex_payload)?;
+                    println!("Full schema verification successful!");
+                    println!();
+                    schema::display_schema(&schema);
+                }
+                return Ok(());
+            }
+
+            // Generate mode - create new schema
+            let chain_id = app.config.grpc_url.to_string();
+            let schema = schema::generate_schema(&chain_id);
+
+            // Merkle mode - output compact digest
+            if *merkle {
+                let digest = schema::generate_schema_digest(&schema);
+
+                // If proof_for specified, also generate and show proof
+                if let Some(field_num) = proof_for {
+                    if let Some(proof) = schema::generate_action_proof(&schema, *field_num) {
+                        println!("Action Proof for field {}", field_num);
+                        println!("========================");
+                        println!("Action:     {}", proof.action.display_name);
+                        println!("Leaf Index: {}", proof.leaf_index);
+                        println!("Proof Size: {} hashes ({} bytes)",
+                            proof.proof.len(), proof.proof.len() * 32);
+                        println!();
+
+                        // Verify it works
+                        let valid = schema::verify_action_proof(&proof, &digest.action_tree_root);
+                        println!("Proof Valid: {}", if valid { "✓" } else { "✗" });
+                        println!();
+
+                        // Output proof as JSON
+                        let proof_json = serde_json::to_string_pretty(&proof)?;
+                        println!("Proof JSON:\n{}", proof_json);
+                    } else {
+                        anyhow::bail!("No action with field number {}", field_num);
+                    }
+                    return Ok(());
+                }
+
+                if *hex {
+                    let qr_bytes = schema::encode_digest_qr(&digest)?;
+                    let hex_str: String = qr_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("{}", hex_str);
+                } else {
+                    let qr_bytes = schema::encode_digest_qr(&digest)?;
+                    let full_schema_bytes = schema::encode_schema_qr(&schema)?;
+
+                    println!("Penumbra Schema Digest (Merkleized)");
+                    println!("===================================");
+                    println!("Version:          {}", digest.version);
+                    println!("Chain:            {}", digest.chain_id);
+                    println!("Protocol:         {}", digest.protocol_version);
+                    println!("Actions:          {}", digest.action_count);
+                    println!("Merkle Root:      {}", hex::encode(&digest.action_tree_root[..8]));
+                    println!();
+                    println!("Size comparison:");
+                    println!("  Full schema:    {} bytes", full_schema_bytes.len());
+                    println!("  Merkle digest:  {} bytes", qr_bytes.len());
+                    println!("  Savings:        {:.1}%",
+                        100.0 * (1.0 - qr_bytes.len() as f64 / full_schema_bytes.len() as f64));
+                    println!();
+                    println!("Scan this QR code with Zigner to import the merkle root:");
+                    println!();
+                    crate::qr::display_qr_terminal(&qr_bytes)?;
+                }
+                return Ok(());
+            }
+
+            if let Some(json_path) = json {
+                // Output as JSON file
+                let json_bytes = serde_json::to_vec_pretty(&schema)?;
+                std::fs::write(json_path, &json_bytes)?;
+                println!("Schema written to {:?}", json_path);
+            } else if *hex {
+                // Output as hex
+                let qr_bytes = schema::encode_schema_qr(&schema)?;
+                let hex_str: String = qr_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                println!("{}", hex_str);
+            } else {
+                // Output as QR code using existing qr module
+                let qr_bytes = schema::encode_schema_qr(&schema)?;
+                println!("Penumbra Action Schema v{}", schema.version);
+                println!("Chain: {}", schema.chain_id);
+                println!("Protocol: {}", schema.protocol_version);
+                println!("Actions defined: {}", schema.actions.len());
+                println!();
+                println!("Scan this QR code with your airgap signer to import the schema:");
+                println!();
+                crate::qr::display_qr_terminal(&qr_bytes)?;
+                println!();
+                println!("Total payload size: {} bytes", qr_bytes.len());
+            }
+            return Ok(());
+        }
+
+        // Handle Registry command
+        if let TxCmd::Registry { hex, verify, chain, url, list } = self {
+            // Verify mode
+            if let Some(hex_payload) = verify {
+                let digest = schema::decode_registry_qr(hex_payload)?;
+                println!("Registry digest verification successful!");
+                println!();
+                schema::display_registry(&digest);
+                return Ok(());
+            }
+
+            // Fetch from prax-registry
+            let registry_url = url.clone().unwrap_or_else(|| {
+                format!(
+                    "https://raw.githubusercontent.com/prax-wallet/registry/main/registry/chains/{}.json",
+                    chain
+                )
+            });
+
+            println!("Fetching registry from {}...", registry_url);
+
+            let client = reqwest::Client::new();
+            let response = client.get(&registry_url).send().await?;
+
+            if !response.status().is_success() {
+                anyhow::bail!("Failed to fetch registry: {}", response.status());
+            }
+
+            let registry_json: serde_json::Value = response.json().await?;
+
+            // Parse assets from prax-registry format
+            let assets = schema::parse_prax_registry(&registry_json)?;
+
+            println!("Loaded {} assets from registry", assets.len());
+
+            if *list {
+                println!();
+                println!("Assets:");
+                for asset in &assets {
+                    println!("  {} ({}) - {} decimals",
+                        asset.symbol, asset.denom, asset.decimals);
+                }
+                println!();
+            }
+
+            // Generate merkle digest
+            let digest = schema::generate_registry_digest(&assets, chain);
+
+            if *hex {
+                let qr_bytes = schema::encode_registry_qr(&digest)?;
+                let hex_str: String = qr_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                println!("{}", hex_str);
+            } else {
+                let qr_bytes = schema::encode_registry_qr(&digest)?;
+
+                println!();
+                schema::display_registry(&digest);
+                println!();
+                println!("Scan this QR to import the asset registry:");
+                println!();
+                crate::qr::display_qr_terminal(&qr_bytes)?;
+                println!();
+                println!("Payload size: {} bytes", qr_bytes.len());
+            }
+
+            return Ok(());
+        }
+
         // TODO: use a command line flag to determine the fee token,
         // and pull the appropriate GasPrices out of this rpc response,
         // the rest should follow
@@ -1636,6 +1932,8 @@ impl TxCmd {
                 println!("Noble response: {:?}", r);
             }
             TxCmd::LqtVote(cmd) => cmd.exec(app, gas_prices).await?,
+            TxCmd::Schema { .. } => unreachable!("Schema handled above"),
+            TxCmd::Registry { .. } => unreachable!("Registry handled above"),
         }
 
         Ok(())
