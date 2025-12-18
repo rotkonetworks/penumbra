@@ -431,6 +431,9 @@ async fn main() -> anyhow::Result<()> {
             export_directory,
             export_archive,
             prune,
+            keep_versions,
+            prune_dex_data,
+            prune_sct_data,
         } => {
             use fs_extra;
 
@@ -451,11 +454,23 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("finished copying node state");
 
             let dst_rocksdb_dir = export_directory.join("rocksdb");
-            // If prune=true, then export-directory is required, because we must munge state prior
-            // to compressing. So we'll just mandate the presence of the --export-directory arg
-            // always.
+            // If prune=true, prune the exported state before archiving.
             if prune {
-                unimplemented!("storage pruning is unimplemented (for now)")
+                let config = pd::prune::PruneConfig {
+                    keep_versions,
+                    prune_dex_data,
+                    prune_sct_data,
+                    batch_size: 10000,
+                };
+                tracing::info!(?config, "pruning exported state");
+                let stats = pd::prune::prune_storage(&dst_rocksdb_dir, &config)
+                    .context("failed to prune exported state")?;
+                tracing::info!(
+                    jmt_nodes_deleted = stats.jmt_nodes_deleted,
+                    jmt_values_deleted = stats.jmt_values_deleted,
+                    nonverifiable_deleted = stats.nonverifiable_deleted,
+                    "pruning complete"
+                );
             }
 
             // Compress to tarball if requested.
@@ -470,6 +485,30 @@ async fn main() -> anyhow::Result<()> {
                 // Provide friendly "OK" message that's still accurate without archiving.
                 tracing::info!("export complete: {}", export_directory.display());
             }
+        }
+        RootCommand::Prune {
+            home,
+            keep_versions,
+            prune_dex_data,
+            prune_sct_data,
+            batch_size,
+        } => {
+            let rocksdb_dir = home.join("rocksdb");
+            let config = pd::prune::PruneConfig {
+                keep_versions,
+                prune_dex_data,
+                prune_sct_data,
+                batch_size,
+            };
+            tracing::info!(?config, rocksdb_dir = %rocksdb_dir.display(), "pruning storage");
+            let stats = pd::prune::prune_storage(&rocksdb_dir, &config)
+                .context("failed to prune storage")?;
+            tracing::info!(
+                jmt_nodes_deleted = stats.jmt_nodes_deleted,
+                jmt_values_deleted = stats.jmt_values_deleted,
+                nonverifiable_deleted = stats.nonverifiable_deleted,
+                "pruning complete"
+            );
         }
         RootCommand::Migrate {
             home,

@@ -113,9 +113,41 @@ pub enum RootCommand {
         /// node state, e.g. ~/pd-backup.tar.gz.
         #[clap(long, display_order = 200)]
         export_archive: Option<PathBuf>,
-        /// Whether to prune the JMT tree.
+        /// Whether to prune the JMT tree during export.
+        /// This removes historical versions, keeping only recent state.
         #[clap(long, display_order = 300)]
         prune: bool,
+        /// Number of recent versions to keep when pruning.
+        /// Default is 17280 (~24 hours at 5s blocks).
+        #[clap(long, display_order = 301, default_value = "17280")]
+        keep_versions: u64,
+        /// Also prune historical DEX data (candlesticks, swap executions).
+        #[clap(long, display_order = 302)]
+        prune_dex_data: bool,
+        /// Also prune historical SCT data (block timestamps).
+        #[clap(long, display_order = 303)]
+        prune_sct_data: bool,
+    },
+
+    /// Prune historical state from the storage to reduce disk usage.
+    /// This is a destructive operation that removes old JMT versions.
+    Prune {
+        /// The home directory of the full node.
+        #[clap(long, env = "PENUMBRA_PD_HOME", display_order = 100)]
+        home: PathBuf,
+        /// Number of recent versions to keep.
+        /// Default is 17280 (~24 hours at 5s blocks).
+        #[clap(long, display_order = 200, default_value = "17280")]
+        keep_versions: u64,
+        /// Also prune historical DEX data (candlesticks, swap executions).
+        #[clap(long, display_order = 300)]
+        prune_dex_data: bool,
+        /// Also prune historical SCT data (block timestamps).
+        #[clap(long, display_order = 301)]
+        prune_sct_data: bool,
+        /// Batch size for delete operations (default: 10000).
+        #[clap(long, display_order = 400, default_value = "10000")]
+        batch_size: usize,
     },
 
     /// Run a migration before resuming post-upgrade.
