@@ -1,180 +1,114 @@
-//! Distributed key generation for Zcash Orchard custody.
+//! Key generation for Zcash Orchard custody.
 //!
-//! This mirrors `threshold::dkg` but targets the Pallas curve.
+//! Provides both trusted-dealer and (future) interactive DKG modes.
 //!
-//! # Protocol (3 rounds)
+//! # Trusted dealer mode
 //!
-//! Round 1: Each participant broadcasts:
-//!   - FROST DKG round1 package (commitment to polynomial + proof of knowledge)
-//!   - Nullifier share commitment (blake2b hash of their nk share)
-//!   - Ephemeral encryption public key (for round 2 encrypted packages)
-//!   - ed25519 verification key (identity)
+//! One party generates all shares and distributes them. Simpler but
+//! requires trusting the dealer to delete the secret after splitting.
+//! Acceptable for initial deployment, validator-operated bridge, or
+//! when the dealer is a secure enclave / ceremony.
 //!
-//! Round 2: Each participant sends (encrypted, signed):
-//!   - FROST DKG round2 package to each other participant
-//!   - Opened nullifier share (verified against round 1 commitment)
-//!   - ed25519 signature over the entire message
+//! # Interactive DKG (TODO)
 //!
-//! Round 3 (local): Each participant:
-//!   - Decrypts their round 2 packages
-//!   - Verifies nullifier commitments
-//!   - Derives their signing share + group verifying key
-//!   - Sums nullifier shares to get shared nk
-//!   - Produces ZcashConfig
+//! reddsa 0.5.x only exposes the trusted dealer API. When the DKG
+//! module is exposed (or via frost-rerandomized directly), this will
+//! be upgraded to full interactive DKG with nullifier commitments,
+//! matching Penumbra's threshold::dkg protocol.
 //!
-//! # Security properties
+//! # Nullifier key
 //!
-//! - No single participant learns the spending key (ask) or can sign alone
-//! - Nullifier key (nk) is derived collectively — committed in round 1,
-//!   opened in round 2, summed in round 3
-//! - ed25519 signatures on all messages prevent forgery and impersonation
-//! - Encrypted round 2 packages prevent eavesdropping on shares
-//! - Commitment scheme prevents equivocation on nullifier shares
-//!
-//! # Differences from threshold::dkg
-//!
-//! - Uses Pallas curve (not decaf377) — for Zcash Orchard compatibility
-//! - Nullifier is a Pallas base field element (not Fq from decaf377)
-//! - Group key is a Pallas point (derives Orchard address, not Penumbra address)
-//! - Would use `reddsa` crate with `frost` feature for RedPallas FROST
-//!
-//! # TODO
-//!
-//! This module defines the types and protocol structure. The actual
-//! cryptographic operations require integrating the `reddsa` crate
-//! with its `frost` feature, which provides:
-//! - `reddsa::frost::keys::dkg` — DKG round functions
-//! - `reddsa::frost::round1`, `round2` — signing round functions
-//! - `reddsa::frost::aggregate` — signature aggregation
-//!
-//! The `reddsa` crate uses `frost-rerandomized` internally, which
-//! handles the randomization needed for Orchard spend authorization.
+//! The nullifier key (nk) is generated separately and shared with all
+//! participants. In trusted dealer mode, the dealer generates nk. In
+//! interactive DKG mode, each participant commits to a nullifier share
+//! in round 1 and opens in round 2 (same as Penumbra's approach).
 
 use std::collections::HashMap;
+
+use anyhow::{anyhow, Result};
 use ed25519_consensus::{SigningKey, VerificationKey};
+use rand_core::CryptoRngCore;
 
-/// Commitment to a nullifier share, preventing equivocation.
+use reddsa::frost::redpallas::{self, keys, Identifier};
+
+use super::config::ZcashConfig;
+
+/// Generate configs for all participants using a trusted dealer.
 ///
-/// Created in round 1, verified in round 3 against the opened value.
-/// Uses blake2b with domain separator to bind the commitment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NullifierCommitment([u8; 32]);
-
-impl NullifierCommitment {
-    /// Create a commitment to a nullifier share.
-    pub fn create(share: &[u8; 32]) -> Self {
-        let hash = blake2b_simd::Params::new()
-            .personal(b"zcash-nk-commit\0")
-            .hash(share);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&hash.as_bytes()[..32]);
-        Self(out)
+/// This is the analog of `threshold::Config::deal`. The dealer knows the
+/// full secret (ask + nk) and splits it. In production, use interactive DKG.
+pub fn deal(
+    rng: &mut impl CryptoRngCore,
+    t: u16,
+    n: u16,
+    osst_allocations: &[(u32, bool)], // (osst_shares, frost_executor) per participant
+) -> Result<Vec<ZcashConfig>> {
+    if osst_allocations.len() != n as usize {
+        anyhow::bail!("osst_allocations length must match n");
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
+    // Generate ed25519 identity keys for each participant
+    let signing_keys: Vec<SigningKey> = (0..n)
+        .map(|_| SigningKey::new(&mut *rng))
+        .collect();
 
-/// Round 1 message broadcast to all participants.
-#[derive(Clone, Debug)]
-pub struct Round1 {
-    /// FROST DKG round 1 package (serialized).
-    pub frost_package: Vec<u8>,
-    /// Commitment to our nullifier share.
-    pub nullifier_commitment: NullifierCommitment,
-    /// Ephemeral encryption key for receiving round 2 packages.
-    pub epk: [u8; 32],
-    /// Our ed25519 verification key (identity).
-    pub vk: VerificationKey,
-}
+    let verification_keys: Vec<VerificationKey> = signing_keys
+        .iter()
+        .map(|sk| sk.verification_key())
+        .collect();
 
-/// Round 2 message sent to all participants (contains encrypted sub-shares).
-#[derive(Clone, Debug)]
-pub struct Round2 {
-    /// For each other participant: encrypted FROST round 2 package.
-    pub encrypted_packages: HashMap<[u8; 32], Vec<u8>>,
-    /// Our opened nullifier share (verified against round 1 commitment).
-    pub nullifier_share: [u8; 32],
-    /// Our ed25519 verification key.
-    pub vk: VerificationKey,
-    /// Signature over (encrypted_packages || nullifier_share).
-    pub sig: [u8; 64],
-}
+    // Use default sequential identifiers (1, 2, 3, ...)
+    // RedPallas ciphersuite doesn't support identifier derivation from bytes
+    let id_list = keys::IdentifierList::Default;
+    let (share_map, public_key_package) =
+        keys::generate_with_dealer(n, t, id_list, &mut *rng)
+            .map_err(|e| anyhow!("FROST dealer keygen failed: {}", e))?;
 
-impl Round2 {
-    /// Create a signed round 2 message.
-    pub fn make(
-        sk: &SigningKey,
-        encrypted_packages: HashMap<[u8; 32], Vec<u8>>,
-        nullifier_share: [u8; 32],
-    ) -> Self {
-        let sig_data = Self::signing_data(&encrypted_packages, &nullifier_share);
-        let sig = sk.sign(&sig_data);
-        Self {
-            encrypted_packages,
-            nullifier_share,
-            vk: sk.verification_key(),
-            sig: sig.to_bytes(),
-        }
-    }
+    // Collect identifiers in order from the share map
+    let mut identifiers: Vec<Identifier> = share_map.keys().cloned().collect();
+    identifiers.sort_by_key(|id| id.serialize());
 
-    /// Verify the signature and extract the packages.
-    pub fn verify_and_extract(
-        &self,
-    ) -> Result<(&HashMap<[u8; 32], Vec<u8>>, [u8; 32]), &'static str> {
-        let sig_data = Self::signing_data(&self.encrypted_packages, &self.nullifier_share);
-        let sig = ed25519_consensus::Signature::try_from(self.sig.as_slice())
-            .map_err(|_| "invalid signature bytes")?;
-        self.vk.verify(&sig, &sig_data).map_err(|_| "signature verification failed")?;
-        Ok((&self.encrypted_packages, self.nullifier_share))
-    }
+    // Generate shared nullifier key (random, known to all participants)
+    let mut nullifier_key = [0u8; 32];
+    rng.fill_bytes(&mut nullifier_key);
 
-    fn signing_data(
-        packages: &HashMap<[u8; 32], Vec<u8>>,
-        nullifier: &[u8; 32],
-    ) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"zcash-dkg-round2\0");
-        // Sort by key for deterministic encoding
-        let mut sorted: Vec<_> = packages.iter().collect();
-        sorted.sort_by_key(|(k, _)| *k);
-        for (k, v) in sorted {
-            data.extend_from_slice(k);
-            data.extend_from_slice(&(v.len() as u32).to_le_bytes());
-            data.extend_from_slice(v);
-        }
-        data.extend_from_slice(nullifier);
-        data
-    }
-}
+    // Build verifying shares map
+    let verifying_shares: HashMap<String, String> = public_key_package
+        .signer_pubkeys()
+        .iter()
+        .map(|(id, share)| {
+            (
+                hex::encode(id.serialize()),
+                hex::encode(share.serialize()),
+            )
+        })
+        .collect();
 
-/// State retained after round 1 (secret, not transmitted).
-pub struct Round1State {
-    /// FROST's internal round 1 secret state (serialized).
-    pub frost_secret: Vec<u8>,
-    /// Our nullifier share (to open in round 2).
-    pub nullifier_share: [u8; 32],
-    /// Our ed25519 signing key.
-    pub sk: SigningKey,
-    /// Our ephemeral decryption key.
-    pub edk: [u8; 32],
-}
+    // Build config for each participant
+    let configs: Vec<ZcashConfig> = identifiers
+        .iter()
+        .zip(signing_keys.iter())
+        .zip(osst_allocations.iter())
+        .map(|((id, sk), (osst_shares, frost_executor))| {
+            let secret_share = &share_map[id];
+            // Convert SecretShare to KeyPackage for the signing share
+            let key_package: keys::KeyPackage = secret_share.clone().try_into()
+                .expect("secret share to key package conversion should not fail");
 
-/// State retained after round 2 (secret, not transmitted).
-pub struct Round2State {
-    /// FROST's internal round 2 secret state (serialized).
-    pub frost_secret: Vec<u8>,
-    /// FROST round 1 packages from all participants.
-    pub round1_packages: Vec<(VerificationKey, Vec<u8>)>,
-    /// Map from vk → (nullifier commitment) for verification in round 3.
-    pub nullifier_commitments: HashMap<[u8; 32], NullifierCommitment>,
-    /// Our nullifier share.
-    pub nullifier_share: [u8; 32],
-    /// Our signing key.
-    pub sk: SigningKey,
-    /// Our decryption key.
-    pub edk: [u8; 32],
+            ZcashConfig {
+                threshold: t,
+                group_verifying_key: public_key_package.group_public().serialize(),
+                spend_key_share: key_package.secret_share().serialize(),
+                nullifier_key,
+                signing_key: sk.as_bytes().to_owned(),
+                verifying_shares: verifying_shares.clone(),
+                osst_shares: *osst_shares,
+                frost_executor: *frost_executor,
+            }
+        })
+        .collect();
+
+    Ok(configs)
 }
 
 #[cfg(test)]
@@ -183,43 +117,87 @@ mod tests {
     use rand_core::OsRng;
 
     #[test]
-    fn test_nullifier_commitment() {
-        let share = [42u8; 32];
-        let commitment = NullifierCommitment::create(&share);
-        let commitment2 = NullifierCommitment::create(&share);
-        assert_eq!(commitment, commitment2);
+    fn test_deal_2_of_3() {
+        let allocations = vec![
+            (37, true),  // iqlusion-like
+            (36, true),  // informal-like
+            (19, false), // rotko-like
+        ];
 
-        let different = NullifierCommitment::create(&[43u8; 32]);
-        assert_ne!(commitment, different);
+        let configs = deal(&mut OsRng, 2, 3, &allocations).unwrap();
+
+        assert_eq!(configs.len(), 3);
+
+        // All agree on group key
+        assert_eq!(configs[0].group_verifying_key, configs[1].group_verifying_key);
+        assert_eq!(configs[1].group_verifying_key, configs[2].group_verifying_key);
+
+        // All agree on nullifier
+        assert_eq!(configs[0].nullifier_key, configs[1].nullifier_key);
+        assert_eq!(configs[1].nullifier_key, configs[2].nullifier_key);
+
+        // Different signing shares
+        assert_ne!(configs[0].spend_key_share, configs[1].spend_key_share);
+        assert_ne!(configs[1].spend_key_share, configs[2].spend_key_share);
+
+        // Threshold = 2
+        assert_eq!(configs[0].threshold, 2);
+
+        // OSST allocations correct
+        assert_eq!(configs[0].osst_shares, 37);
+        assert!(configs[0].frost_executor);
+        assert!(!configs[2].frost_executor);
+
+        // Group key is non-zero (valid Pallas point)
+        assert_ne!(configs[0].group_verifying_key, [0u8; 32]);
+
+        println!("deal complete:");
+        println!("  group key: {}", hex::encode(&configs[0].group_verifying_key));
+        println!("  nullifier: {}", hex::encode(&configs[0].nullifier_key));
+        println!("  threshold: 2-of-3");
+        println!("  shares: {} distinct", configs.len());
     }
 
     #[test]
-    fn test_round2_signature_verification() {
-        let sk = SigningKey::new(OsRng);
-        let mut packages = HashMap::new();
-        packages.insert([1u8; 32], vec![0xAA, 0xBB]);
-        let nullifier = [99u8; 32];
+    fn test_deal_4_of_5_penumbra_committee() {
+        // Simulates the FROST committee allocation for Penumbra validators
+        let allocations = vec![
+            (47, true),  // top validator
+            (31, true),  // second
+            (17, true),  // third
+            (17, true),  // fourth
+            (11, true),  // fifth
+        ];
 
-        let round2 = Round2::make(&sk, packages, nullifier);
+        let configs = deal(&mut OsRng, 4, 5, &allocations).unwrap();
 
-        // should verify
-        let (_, opened_nk) = round2.verify_and_extract().unwrap();
-        assert_eq!(opened_nk, nullifier);
+        assert_eq!(configs.len(), 5);
+        assert_eq!(configs[0].threshold, 4);
+
+        // All agree on group key
+        for c in &configs[1..] {
+            assert_eq!(configs[0].group_verifying_key, c.group_verifying_key);
+            assert_eq!(configs[0].nullifier_key, c.nullifier_key);
+        }
+
+        // All are executors
+        for c in &configs {
+            assert!(c.frost_executor);
+        }
+
+        println!("4-of-5 committee deal complete");
+        println!("  group key: {}", hex::encode(&configs[0].group_verifying_key));
     }
 
     #[test]
-    fn test_round2_tampered_signature_fails() {
-        let sk = SigningKey::new(OsRng);
-        let mut packages = HashMap::new();
-        packages.insert([1u8; 32], vec![0xAA]);
-        let nullifier = [99u8; 32];
+    fn test_config_serialization_after_deal() {
+        let configs = deal(&mut OsRng, 2, 2, &[(10, true), (10, true)]).unwrap();
 
-        let mut round2 = Round2::make(&sk, packages, nullifier);
+        let json = serde_json::to_string(&configs[0]).unwrap();
+        let recovered: ZcashConfig = serde_json::from_str(&json).unwrap();
 
-        // tamper with nullifier
-        round2.nullifier_share = [0u8; 32];
-
-        // should fail
-        assert!(round2.verify_and_extract().is_err());
+        assert_eq!(configs[0].group_verifying_key, recovered.group_verifying_key);
+        assert_eq!(configs[0].threshold, recovered.threshold);
+        assert_eq!(configs[0].nullifier_key, recovered.nullifier_key);
     }
 }

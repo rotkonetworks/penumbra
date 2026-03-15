@@ -21,6 +21,8 @@ decaf377-frost = { version = "2.1.1", path = "../crypto/decaf377-frost" }
 decaf377-ka = {workspace = true}
 decaf377-rdsa = {workspace = true}
 ed25519-consensus = {workspace = true}
+# Zcash Orchard threshold signing (RedPallas FROST)
+reddsa = { version = "0.5", features = ["frost"] }
 futures = {workspace = true}
 hex = {workspace = true}
 penumbra-sdk-governance = {workspace = true, default-features = false}
