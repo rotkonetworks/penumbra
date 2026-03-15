@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use cnidarium::{StateRead, StateWrite};
 use penumbra_sdk_asset::asset;
-use penumbra_sdk_proto::DomainType;
+use penumbra_sdk_proto::{DomainType, Message};
 
 use crate::{error::TokenFactoryError, TokenFactoryId};
 
