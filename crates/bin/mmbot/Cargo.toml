@@ -1,0 +1,58 @@
+[package]
+name = "mmbot"
+version = "0.1.0"
+edition = "2021"
+description = "CTM-powered market maker for Penumbra DEX"
+publish = false
+
+[features]
+default = ["std", "parallel", "download-proving-keys"]
+download-proving-keys = ["penumbra-sdk-proof-params/download-proving-keys"]
+std = ["ark-ff/std", "ibc-types/std"]
+parallel = [
+    "penumbra-sdk-proof-params/parallel",
+    "decaf377/parallel",
+    "penumbra-sdk-shielded-pool/parallel",
+    "penumbra-sdk-dex/parallel",
+    "penumbra-sdk-transaction/parallel",
+    "penumbra-sdk-wallet/parallel",
+]
+
+[dependencies]
+anyhow = { workspace = true }
+ark-ff = { workspace = true, default-features = false }
+camino = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+decaf377 = { workspace = true, default-features = true }
+directories = { workspace = true }
+futures = { workspace = true }
+ibc-types = { workspace = true, features = ["std", "with_serde"], default-features = true }
+rand = { workspace = true }
+rand_core = { workspace = true, features = ["getrandom"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["hex"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+toml = { workspace = true, features = ["preserve_order"] }
+tonic = { workspace = true, features = ["channel", "tls-ring", "tls-webpki-roots", "transport"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "ansi"] }
+url = { workspace = true, features = ["serde"] }
+
+# Penumbra SDK
+penumbra-sdk-asset = { workspace = true, default-features = false }
+penumbra-sdk-custody = { workspace = true }
+penumbra-sdk-dex = { workspace = true, default-features = false }
+penumbra-sdk-fee = { workspace = true, default-features = false }
+penumbra-sdk-keys = { workspace = true, default-features = false }
+penumbra-sdk-num = { workspace = true, default-features = false }
+penumbra-sdk-proof-params = { workspace = true, default-features = true }
+penumbra-sdk-proto = { workspace = true, features = ["rpc", "box-grpc"], default-features = true }
+penumbra-sdk-shielded-pool = { workspace = true, default-features = false }
+penumbra-sdk-transaction = { workspace = true, default-features = true }
+penumbra-sdk-view = { workspace = true }
+penumbra-sdk-wallet = { workspace = true }
+
+# ML inference
+tch = "0.23"

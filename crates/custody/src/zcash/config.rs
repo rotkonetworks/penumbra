@@ -26,7 +26,9 @@ pub const OSST_THRESHOLD: u32 = 134;
 pub const FROST_COMMITTEE_SIZE: u32 = 5;
 
 /// FROST threshold within the committee.
-pub const FROST_THRESHOLD: u16 = 4;
+/// Low because OSST is the real security layer.
+/// 2-of-5 maximizes liveness while preventing single-executor theft.
+pub const FROST_THRESHOLD: u16 = 2;
 
 /// Configuration for a single participant in the Zcash custody scheme.
 ///

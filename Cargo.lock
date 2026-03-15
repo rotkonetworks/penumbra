@@ -1004,6 +1004,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bls12_381"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7bc6d6292be3a19e6379786dac800f551e5865a5bb51ebbe3064ab80433f403"
+dependencies = [
+ "ff",
+ "rand_core",
+ "subtle",
+]
+
+[[package]]
 name = "bluez-async"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1960,8 +1971,8 @@ dependencies = [
  "blake2b_simd 1.0.2",
  "decaf377",
  "decaf377-rdsa",
- "frost-core",
- "frost-rerandomized",
+ "frost-core 0.7.0",
+ "frost-rerandomized 0.7.0",
  "penumbra-sdk-proto",
  "rand_core",
 ]
@@ -2567,6 +2578,23 @@ dependencies = [
 
 [[package]]
 name = "frost-core"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16b73d2895e352c7942537e47c9ec5899b89704228b837d4375c5071cf721152"
+dependencies = [
+ "byteorder",
+ "debugless-unwrap",
+ "derive-getters",
+ "hex",
+ "itertools 0.11.0",
+ "rand_core",
+ "thiserror 1.0.69",
+ "visibility 0.0.1",
+ "zeroize",
+]
+
+[[package]]
+name = "frost-core"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3b61d737e19bea0cedda9a11dab96ab1fd1e4016f707e8ee9018d8f17d2cd18"
@@ -2583,8 +2611,18 @@ dependencies = [
  "serde",
  "serdect",
  "thiserror 1.0.69",
- "visibility",
+ "visibility 0.1.0",
  "zeroize",
+]
+
+[[package]]
+name = "frost-rerandomized"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c47b3c1c902d8c30630c652a1839f0414eef07d63551730f627ad716febc136a"
+dependencies = [
+ "frost-core 0.6.0",
+ "rand_core",
 ]
 
 [[package]]
@@ -2595,7 +2633,7 @@ checksum = "2b45409d93cf5000f52ae64847a8a270a4562f1a035e74c3fae0e2462adb97ae"
 dependencies = [
  "derive-getters",
  "document-features",
- "frost-core",
+ "frost-core 0.7.0",
  "rand_core",
 ]
 
@@ -3888,6 +3926,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "jubjub"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8499f7a74008aafbecb2a2e608a3e13e4dd3e84df198b604451efe93f2de6e61"
+dependencies = [
+ "bitvec",
+ "bls12_381",
+ "ff",
+ "group",
+ "rand_core",
+ "subtle",
+]
+
+[[package]]
 name = "k256"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4754,6 +4806,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pasta_curves"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3e57598f73cc7e1b2ac63c79c517b31a0877cd7c402cdcaa311b5208de7a095"
+dependencies = [
+ "ff",
+ "group",
+ "rand",
+ "static_assertions",
+ "subtle",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5533,6 +5598,7 @@ dependencies = [
  "penumbra-sdk-txhash",
  "prost 0.13.4",
  "rand_core",
+ "reddsa",
  "serde",
  "serde_json",
  "serde_with",
@@ -7378,6 +7444,25 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "yasna",
+]
+
+[[package]]
+name = "reddsa"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78a5191930e84973293aa5f532b513404460cd2216c1cfb76d08748c15b40b02"
+dependencies = [
+ "blake2b_simd 1.0.2",
+ "byteorder",
+ "frost-rerandomized 0.6.0",
+ "group",
+ "hex",
+ "jubjub",
+ "pasta_curves",
+ "rand_core",
+ "serde",
+ "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -9858,6 +9943,17 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "visibility"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8881d5cc0ae34e3db2f1de5af81e5117a420d2f937506c2dc20d6f4cfb069051"
+dependencies = [
+ "proc-macro2 1.0.93",
+ "quote",
+ "syn 1.0.109",
+]
 
 [[package]]
 name = "visibility"
