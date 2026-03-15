@@ -30,6 +30,20 @@ pub const FROST_COMMITTEE_SIZE: u32 = 5;
 /// 2-of-5 maximizes liveness while preventing single-executor theft.
 pub const FROST_THRESHOLD: u16 = 2;
 
+/// SAFETY INVARIANT: total custody value MUST be less than the cheapest
+/// 2-of-FROST_COMMITTEE_SIZE collusion cost (in staked value).
+///
+/// With current Penumbra validator distribution (2026-03):
+///   cheapest 2-of-5 collusion = validators #4 + #5 = 15.3% of total stake
+///   → max custody < 15.3% of total staked value
+///
+/// This is an ECONOMIC security bound, not cryptographic.
+/// The OSST layer provides cryptographic authorization (2/3 stake).
+/// The FROST layer provides economic execution security (collusion > custody).
+///
+/// Expressed as basis points of total staked value.
+pub const MAX_CUSTODY_BPS: u32 = 1500; // 15% of total staked value
+
 /// Configuration for a single participant in the Zcash custody scheme.
 ///
 /// This is the Zcash analog of `threshold::Config`. The key difference:

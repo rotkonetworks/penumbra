@@ -57,6 +57,16 @@ pub struct ZcashSigningRequest {
 
     /// Hash of the OSST payload (for binding the proof to the request).
     pub osst_payload_hash: [u8; 32],
+
+    /// Monotonic sequence number (replay prevention).
+    /// Each OSST authorization increments this. FROST executors reject
+    /// any nonce ≤ the last executed nonce.
+    pub nonce: u64,
+
+    /// Epoch in which this authorization was produced.
+    /// FROST executors reject requests from previous epochs
+    /// (old committee shares are invalidated by reshare).
+    pub epoch: u64,
 }
 
 /// Round 1 response from a follower.

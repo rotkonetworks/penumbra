@@ -16,9 +16,10 @@
 //!   signing shares. Produces actual Zcash transaction signatures. O(k²)
 //!   communication where k = committee size (~5-10).
 //!
-//! FROST executors can only sign when presented with a valid OSST proof.
-//! To steal funds requires corrupting ALL executors AND forging the OSST
-//! supermajority — strictly harder than compromising either set alone.
+//! FROST executors SHOULD only sign when presented with a valid OSST proof.
+//! This is enforced at the protocol level (followers verify OSST before
+//! signing) but NOT at the Zcash level (Zcash accepts any valid RedPallas
+//! signature). Economic security (slashing) prevents FROST-only theft.
 //!
 //! # Key derivation
 //!
@@ -35,7 +36,26 @@
 //! 200 OSST shares distributed proportional to stake:
 //! - Every validator gets ≥1 share (no exclusion)
 //! - Top ~5 validators form the FROST execution committee
-//! - Threshold: 134/200 (2/3 stake) for OSST, 4-of-5 for FROST
+//! - Threshold: 134/200 (2/3 stake) for OSST, 2-of-5 for FROST
+//!
+//! # Security model
+//!
+//! Two layers with different guarantees:
+//!
+//! - **OSST**: cryptographic. Cannot forge 2/3 stake authorization.
+//!   Prevents unauthorized transactions at the protocol level.
+//!
+//! - **FROST**: economic. The 2-of-5 committee CAN produce valid Zcash
+//!   signatures directly (bypassing OSST on the Zcash side). Security
+//!   comes from slashing: colluders lose more stake than they can steal.
+//!
+//! **INVARIANT**: cheapest 2-of-5 collusion stake > max custody value.
+//! With current validator distribution: custody < 15% of total stake.
+//!
+//! Additional protections:
+//! - Nonce in OSST payload prevents replay
+//! - Epoch-bound FROST shares prevent use after reshare
+//! - Custody cap enforced at protocol level
 //!
 //! # References
 //!
