@@ -41,6 +41,10 @@ pub const FROST_THRESHOLD: u16 = 2;
 /// The OSST layer provides cryptographic authorization (2/3 stake).
 /// The FROST layer provides economic execution security (collusion > custody).
 ///
+/// Phase 1 (no DEX price): governance-enforced via deposit caps.
+/// Phase 2 (pZEC/UM trades on DEX): protocol reads price from DEX state,
+///   automatically pauses deposits when custody approaches the bound.
+///
 /// Expressed as basis points of total staked value.
 pub const MAX_CUSTODY_BPS: u32 = 1500; // 15% of total staked value
 
