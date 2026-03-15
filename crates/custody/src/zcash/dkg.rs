@@ -31,7 +31,7 @@ use rand_core::CryptoRngCore;
 
 use reddsa::frost::redpallas::{self, keys, Identifier};
 
-use super::config::ZcashConfig;
+use super::config::{ZcashConfig, AccountabilityMode};
 
 /// Generate configs for all participants using a trusted dealer.
 ///
@@ -104,6 +104,7 @@ pub fn deal(
                 verifying_shares: verifying_shares.clone(),
                 osst_shares: *osst_shares,
                 frost_executor: *frost_executor,
+                accountability: AccountabilityMode::Private,
             }
         })
         .collect();

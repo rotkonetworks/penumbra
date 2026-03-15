@@ -30,6 +30,24 @@ pub const FROST_COMMITTEE_SIZE: u32 = 5;
 /// 2-of-5 maximizes liveness while preventing single-executor theft.
 pub const FROST_THRESHOLD: u16 = 2;
 
+/// Whether OSST contributions must be signed (accountable) or can be
+/// anonymous (private). Governance-togglable per custody instance.
+///
+/// - `Accountable`: contributors sign with ed25519. FROST executors
+///   verify signatures before signing. Malicious authorizations are
+///   attributable and slashable via Penumbra's Penalty mechanism.
+///
+/// - `Private`: contributions are anonymous (standard OSST). FROST
+///   executors accept any valid threshold proof. Use for jury/governance
+///   where voter privacy matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountabilityMode {
+    /// Contributors sign their OSST contributions. Slashable.
+    Accountable,
+    /// Standard OSST — anonymous contributions. Not slashable.
+    Private,
+}
+
 
 /// Configuration for a single participant in the Zcash custody scheme.
 ///
@@ -80,6 +98,15 @@ pub struct ZcashConfig {
 
     /// Whether this participant is in the FROST execution committee.
     pub frost_executor: bool,
+
+    /// Accountability mode for this custody instance.
+    /// Starts as Private, governance can toggle to Accountable later.
+    #[serde(default = "default_accountability")]
+    pub accountability: AccountabilityMode,
+}
+
+fn default_accountability() -> AccountabilityMode {
+    AccountabilityMode::Private
 }
 
 impl ZcashConfig {
@@ -148,6 +175,7 @@ mod tests {
             verifying_shares: HashMap::new(),
             osst_shares: 10,
             frost_executor: true,
+            accountability: AccountabilityMode::Private,
         };
         // Just verify it compiles and drops cleanly
         drop(config);
@@ -168,6 +196,7 @@ mod tests {
             },
             osst_shares: 37,
             frost_executor: true,
+            accountability: AccountabilityMode::Private,
         };
 
         let json = serde_json::to_string(&config).unwrap();
