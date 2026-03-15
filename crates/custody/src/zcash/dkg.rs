@@ -29,7 +29,10 @@ use anyhow::{anyhow, Result};
 use ed25519_consensus::{SigningKey, VerificationKey};
 use rand_core::CryptoRngCore;
 
-use reddsa::frost::redpallas::{self, keys, Identifier};
+use reddsa::frost::redpallas::{self, keys, Identifier, PallasBlake2b512};
+
+// Access frost-core's DKG through frost-rerandomized's re-export
+use frost_rerandomized::frost_core::frost::keys::dkg as frost_dkg;
 
 use super::config::{ZcashConfig, AccountabilityMode};
 
@@ -117,6 +120,57 @@ pub fn deal(
         .collect();
 
     Ok(configs)
+}
+
+// =========================================================================
+// Interactive DKG (no trusted dealer)
+// =========================================================================
+
+/// Type aliases for the DKG protocol types on PallasBlake2b512.
+pub mod dkg_types {
+    use super::*;
+    pub type Round1Package = frost_dkg::round1::Package<PallasBlake2b512>;
+    pub type Round1Secret = frost_dkg::round1::SecretPackage<PallasBlake2b512>;
+    pub type Round2Package = frost_dkg::round2::Package<PallasBlake2b512>;
+    pub type Round2Secret = frost_dkg::round2::SecretPackage<PallasBlake2b512>;
+}
+
+/// Interactive DKG round 1.
+///
+/// Each participant calls this independently. Broadcast the package to all others.
+pub fn dkg_part1(
+    rng: &mut impl CryptoRngCore,
+    identifier: Identifier,
+    n: u16,
+    t: u16,
+) -> Result<(dkg_types::Round1Secret, dkg_types::Round1Package)> {
+    frost_dkg::part1::<PallasBlake2b512, _>(identifier, n, t, rng)
+        .map_err(|e| anyhow!("DKG part1 failed: {}", e))
+}
+
+/// Interactive DKG round 2.
+///
+/// Takes all other participants' round 1 packages (as HashMap keyed by identifier).
+/// Returns secret state + one package per other participant (send privately).
+pub fn dkg_part2(
+    secret: dkg_types::Round1Secret,
+    round1_packages: &HashMap<Identifier, dkg_types::Round1Package>,
+) -> Result<(dkg_types::Round2Secret, HashMap<Identifier, dkg_types::Round2Package>)> {
+    frost_dkg::part2::<PallasBlake2b512>(secret, round1_packages)
+        .map_err(|e| anyhow!("DKG part2 failed: {}", e))
+}
+
+/// Interactive DKG round 3 (local finalization).
+///
+/// Produces the key package (secret share) and public key package (group key).
+/// No single party ever sees the full spending key.
+pub fn dkg_part3(
+    secret: &dkg_types::Round2Secret,
+    round1_packages: &HashMap<Identifier, dkg_types::Round1Package>,
+    round2_packages: &HashMap<Identifier, dkg_types::Round2Package>,
+) -> Result<(keys::KeyPackage, keys::PublicKeyPackage)> {
+    frost_dkg::part3::<PallasBlake2b512>(secret, round1_packages, round2_packages)
+        .map_err(|e| anyhow!("DKG part3 failed: {}", e))
 }
 
 #[cfg(test)]
@@ -264,6 +318,115 @@ mod tests {
         rpk.verify(message, &reddsa_sig).expect("signing should work");
 
         println!("deal() config structure verified + fresh keygen signing verified");
+    }
+
+    #[test]
+    fn test_interactive_dkg_2_of_3() {
+        // True peer-to-peer DKG — no trusted dealer, no single party sees the key.
+        use std::collections::HashMap;
+        use reddsa::frost::redpallas::{self, keys, round1, round2};
+
+        let t = 2u16;
+        let n = 3u16;
+
+        // Sequential identifiers
+        let ids: Vec<Identifier> = (1..=n)
+            .map(|i| Identifier::try_from(i).unwrap())
+            .collect();
+
+        // Part 1: each participant generates their package
+        let mut secrets1 = HashMap::new();
+        let mut packages1 = HashMap::new();
+        for &id in &ids {
+            let (secret, pkg) = dkg_part1(&mut OsRng, id, n, t).unwrap();
+            secrets1.insert(id, secret);
+            packages1.insert(id, pkg);
+        }
+
+        // Part 2: each participant processes others' round 1 packages
+        let mut secrets2 = HashMap::new();
+        let mut all_r2_packages: HashMap<Identifier, HashMap<Identifier, dkg_types::Round2Package>> = HashMap::new();
+        for &id in &ids {
+            let others: HashMap<_, _> = packages1.iter()
+                .filter(|(&k, _)| k != id)
+                .map(|(&k, v)| (k, v.clone()))
+                .collect();
+            let secret = secrets1.remove(&id).unwrap();
+            let (secret2, r2_pkgs) = dkg_part2(secret, &others).unwrap();
+            secrets2.insert(id, secret2);
+            all_r2_packages.insert(id, r2_pkgs);
+        }
+
+        // Part 3: each participant finalizes
+        let mut key_packages = Vec::new();
+        let mut pub_packages = Vec::new();
+        for &id in &ids {
+            let r1_others: HashMap<_, _> = packages1.iter()
+                .filter(|(&k, _)| k != id)
+                .map(|(&k, v)| (k, v.clone()))
+                .collect();
+            // Collect round 2 packages FROM other participants TO this participant
+            let r2_for_me: HashMap<_, _> = ids.iter()
+                .filter(|&&sender| sender != id)
+                .map(|&sender| {
+                    let pkg = all_r2_packages[&sender][&id].clone();
+                    (sender, pkg)
+                })
+                .collect();
+
+            let secret = secrets2.remove(&id).unwrap();
+            let (kp, pp) = dkg_part3(&secret, &r1_others, &r2_for_me).unwrap();
+            key_packages.push(kp);
+            pub_packages.push(pp);
+        }
+
+        // All agree on group key
+        for pp in &pub_packages[1..] {
+            assert_eq!(
+                pub_packages[0].group_public().serialize(),
+                pp.group_public().serialize(),
+            );
+        }
+
+        // Sign with 2 of 3
+        let message = b"peer-to-peer poker settlement";
+        let pubkeys = &pub_packages[0];
+
+        let mut nonces_map = std::collections::BTreeMap::new();
+        let mut commitments_map = std::collections::BTreeMap::new();
+        for kp in &key_packages[..2] {
+            let id = *kp.identifier();
+            let (nonces, commitments) = round1::commit(kp.secret_share(), &mut OsRng);
+            nonces_map.insert(id, nonces);
+            commitments_map.insert(id, commitments);
+        }
+
+        let signing_package = redpallas::SigningPackage::new(commitments_map, message.as_slice());
+        let randomized_params = frost_rerandomized::RandomizedParams::new(pubkeys, &mut OsRng);
+        let randomizer_point = randomized_params.randomizer_point().clone();
+
+        let mut shares_map = HashMap::new();
+        for kp in &key_packages[..2] {
+            let id = *kp.identifier();
+            let nonces = nonces_map.remove(&id).unwrap();
+            let share = round2::sign(&signing_package, &nonces, kp, &randomizer_point).unwrap();
+            shares_map.insert(id, share);
+        }
+
+        let sig = redpallas::aggregate(&signing_package, &shares_map, pubkeys, &randomized_params).unwrap();
+
+        // Verify as RedPallas
+        let sig_bytes: [u8; 64] = sig.serialize().as_ref().try_into().unwrap();
+        let reddsa_sig = reddsa::Signature::<reddsa::orchard::SpendAuth>::from(sig_bytes);
+        let rvk = randomized_params.randomized_group_public_key();
+        let rvk_bytes: [u8; 32] = rvk.serialize().as_ref().try_into().unwrap();
+        let rpk = reddsa::VerificationKey::<reddsa::orchard::SpendAuth>::try_from(
+            reddsa::VerificationKeyBytes::from(rvk_bytes)
+        ).unwrap();
+        rpk.verify(message, &reddsa_sig)
+            .expect("interactive DKG shares should produce valid RedPallas signatures");
+
+        println!("interactive 2-of-3 DKG + sign + verify ✓ (no trusted dealer)");
     }
 
     #[test]
