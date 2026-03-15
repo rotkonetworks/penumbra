@@ -20,6 +20,7 @@ pub mod null_kms;
 pub mod policy;
 pub mod soft_kms;
 pub mod threshold;
+pub mod zcash;
 
 pub use client::CustodyClient;
 pub use pre_auth::PreAuthorization;
