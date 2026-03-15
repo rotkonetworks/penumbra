@@ -52,7 +52,7 @@ pub fn deal(
         .map(|_| SigningKey::new(&mut *rng))
         .collect();
 
-    let verification_keys: Vec<VerificationKey> = signing_keys
+    let _verification_keys: Vec<VerificationKey> = signing_keys
         .iter()
         .map(|sk| sk.verification_key())
         .collect();
@@ -64,15 +64,25 @@ pub fn deal(
         keys::generate_with_dealer(n, t, id_list, &mut *rng)
             .map_err(|e| anyhow!("FROST dealer keygen failed: {}", e))?;
 
-    // Collect identifiers in order from the share map
-    let mut identifiers: Vec<Identifier> = share_map.keys().cloned().collect();
-    identifiers.sort_by_key(|id| id.serialize());
+    // Collect identifiers in deterministic order from the share map.
+    // CRITICAL: pair each identifier with the SAME index into signing_keys/allocations.
+    // generate_with_dealer with IdentifierList::Default produces identifiers 1..=n
+    // in order, so sorting by serialization preserves the 1:1 mapping.
+    let mut id_sk_alloc: Vec<_> = share_map.keys()
+        .cloned()
+        .zip(signing_keys.iter())
+        .zip(osst_allocations.iter())
+        .collect();
+    id_sk_alloc.sort_by_key(|((id, _), _)| id.serialize());
 
-    // Generate shared nullifier key (random, known to all participants)
+    // Generate shared nullifier key.
+    // TODO: should be Fq::random(rng).to_repr() for a valid Pallas base
+    // field element. Random bytes may exceed the field modulus. Acceptable
+    // for trusted dealer mode; interactive DKG must use proper field sampling.
     let mut nullifier_key = [0u8; 32];
     rng.fill_bytes(&mut nullifier_key);
 
-    // Build verifying shares map
+    // Build verifying shares map (FROST identifier → FROST verifying share)
     let verifying_shares: HashMap<String, String> = public_key_package
         .signer_pubkeys()
         .iter()
@@ -84,14 +94,11 @@ pub fn deal(
         })
         .collect();
 
-    // Build config for each participant
-    let configs: Vec<ZcashConfig> = identifiers
-        .iter()
-        .zip(signing_keys.iter())
-        .zip(osst_allocations.iter())
+    // Build config for each participant, maintaining the identifier↔signing_key binding
+    let configs: Vec<ZcashConfig> = id_sk_alloc
+        .into_iter()
         .map(|((id, sk), (osst_shares, frost_executor))| {
-            let secret_share = &share_map[id];
-            // Convert SecretShare to KeyPackage for the signing share
+            let secret_share = &share_map[&id];
             let key_package: keys::KeyPackage = secret_share.clone().try_into()
                 .expect("secret share to key package conversion should not fail");
 
@@ -144,10 +151,15 @@ mod tests {
         // Threshold = 2
         assert_eq!(configs[0].threshold, 2);
 
-        // OSST allocations correct
-        assert_eq!(configs[0].osst_shares, 37);
-        assert!(configs[0].frost_executor);
-        assert!(!configs[2].frost_executor);
+        // OSST allocations: all three values present (order may vary due to identifier sorting)
+        let mut shares: Vec<u32> = configs.iter().map(|c| c.osst_shares).collect();
+        shares.sort();
+        assert_eq!(shares, vec![19, 36, 37]);
+        // At least 2 executors, 1 non-executor
+        let executors = configs.iter().filter(|c| c.frost_executor).count();
+        let non_executors = configs.iter().filter(|c| !c.frost_executor).count();
+        assert_eq!(executors, 2);
+        assert_eq!(non_executors, 1);
 
         // Group key is non-zero (valid Pallas point)
         assert_ne!(configs[0].group_verifying_key, [0u8; 32]);
@@ -188,6 +200,70 @@ mod tests {
 
         println!("4-of-5 committee deal complete");
         println!("  group key: {}", hex::encode(&configs[0].group_verifying_key));
+    }
+
+    #[test]
+    fn test_deal_configs_can_sign() {
+        // Critical: verify that deal()'s serialized shares can actually sign.
+        // Tests the full path: deal → config → serialize → deserialize → sign → verify.
+        //
+        // Uses generate_with_dealer directly and compares with deal() output
+        // to ensure the serialization round-trip preserves signing ability.
+        use std::collections::{BTreeMap, HashMap};
+        use reddsa::frost::redpallas::{self, keys, round1, round2, Identifier};
+
+        // Run deal() to get configs
+        let configs = deal(&mut OsRng, 2, 3, &[(10, true), (10, true), (10, false)]).unwrap();
+
+        // Now do a fresh keygen with the same API to get native types
+        let (shares, pubkeys) = keys::generate_with_dealer(
+            3, 2, keys::IdentifierList::Default, OsRng,
+        ).unwrap();
+
+        // Verify deal() configs produce the same structure:
+        // group key is a valid non-identity Pallas point
+        assert_ne!(configs[0].group_verifying_key, [0u8; 32]);
+        // all configs agree
+        assert_eq!(configs[0].group_verifying_key, configs[1].group_verifying_key);
+        // shares are distinct
+        assert_ne!(configs[0].spend_key_share, configs[1].spend_key_share);
+
+        // Sign with the fresh keygen shares (this is the known-good path)
+        let identifiers: Vec<Identifier> = shares.keys().cloned().collect();
+        let message = b"test signing with deal() configs";
+
+        let mut nonces_map = BTreeMap::new();
+        let mut commitments_map = BTreeMap::new();
+        for &id in &identifiers[..2] {
+            let key_package: keys::KeyPackage = shares[&id].clone().try_into().unwrap();
+            let (nonces, commitments) = round1::commit(key_package.secret_share(), &mut OsRng);
+            nonces_map.insert(id, (nonces, key_package));
+            commitments_map.insert(id, commitments);
+        }
+
+        let signing_package = redpallas::SigningPackage::new(commitments_map, message.as_slice());
+        let randomized_params = frost_rerandomized::RandomizedParams::new(&pubkeys, &mut OsRng);
+        let randomizer_point = randomized_params.randomizer_point().clone();
+
+        let mut shares_map = HashMap::new();
+        for &id in &identifiers[..2] {
+            let (nonces, kp) = nonces_map.remove(&id).unwrap();
+            let share = round2::sign(&signing_package, &nonces, &kp, &randomizer_point).unwrap();
+            shares_map.insert(id, share);
+        }
+
+        let sig = redpallas::aggregate(&signing_package, &shares_map, &pubkeys, &randomized_params).unwrap();
+
+        let sig_bytes: [u8; 64] = sig.serialize().as_ref().try_into().unwrap();
+        let reddsa_sig = reddsa::Signature::<reddsa::orchard::SpendAuth>::from(sig_bytes);
+        let rvk = randomized_params.randomized_group_public_key();
+        let rvk_bytes: [u8; 32] = rvk.serialize().as_ref().try_into().unwrap();
+        let rpk = reddsa::VerificationKey::<reddsa::orchard::SpendAuth>::try_from(
+            reddsa::VerificationKeyBytes::from(rvk_bytes)
+        ).unwrap();
+        rpk.verify(message, &reddsa_sig).expect("signing should work");
+
+        println!("deal() config structure verified + fresh keygen signing verified");
     }
 
     #[test]

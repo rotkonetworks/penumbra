@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use ed25519_consensus::{SigningKey, VerificationKey};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Total OSST shares in the system.
 pub const TOTAL_SHARES: u32 = 200;
@@ -139,9 +140,10 @@ impl ZcashConfig {
 
 impl Drop for ZcashConfig {
     fn drop(&mut self) {
-        // Zeroize secret material
-        self.spend_key_share.fill(0);
-        self.signing_key.fill(0);
+        // Constant-time zeroize of secret material.
+        // Using the zeroize crate prevents compiler from optimizing this away.
+        self.spend_key_share.zeroize();
+        self.signing_key.zeroize();
     }
 }
 

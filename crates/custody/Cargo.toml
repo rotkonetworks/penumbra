@@ -41,6 +41,7 @@ serde_with = {workspace = true, features = ["hex"]}
 tokio = {workspace = true, features = ["full"]}
 tonic = {workspace = true}
 tracing = {workspace = true}
+zeroize = "1"
 
 [dev-dependencies]
 toml = {workspace = true}
