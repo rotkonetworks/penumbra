@@ -49,13 +49,11 @@
 //!   signatures directly (bypassing OSST on the Zcash side). Security
 //!   comes from slashing: colluders lose more stake than they can steal.
 //!
-//! **INVARIANT**: cheapest 2-of-5 collusion stake > max custody value.
-//! With current validator distribution: custody < 15% of total stake.
-//!
 //! Additional protections:
 //! - Nonce in OSST payload prevents replay
 //! - Epoch-bound FROST shares prevent use after reshare
-//! - Custody cap enforced at protocol level
+//! - Slashing: unauthorized spends are publicly attributable, colluders
+//!   lose their staked collateral (held in FROST addresses by peers)
 //!
 //! # References
 //!
