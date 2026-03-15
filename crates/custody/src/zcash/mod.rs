@@ -46,8 +46,13 @@
 //!   Prevents unauthorized transactions at the protocol level.
 //!
 //! - **FROST**: economic. The 2-of-5 committee CAN produce valid Zcash
-//!   signatures directly (bypassing OSST on the Zcash side). Security
-//!   comes from slashing: colluders lose more stake than they can steal.
+//!   signatures directly (bypassing OSST on the Zcash side). Mitigated
+//!   by slashing via Penumbra's existing `Penalty` mechanism.
+//!
+//! FROST executors require signed OSST contributions — each validator
+//! signs their contribution with their ed25519 identity key. If a
+//! malicious spend is detected, the signed contributions prove who
+//! authorized it. Validators are public entities; privacy is not needed.
 //!
 //! Additional protections:
 //! - Nonce in OSST payload prevents replay
