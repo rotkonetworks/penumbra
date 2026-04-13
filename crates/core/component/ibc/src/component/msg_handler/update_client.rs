@@ -209,7 +209,16 @@ async fn client_is_not_expired<S: StateRead, HI: HostInterface>(
     let time_elapsed = now.duration_since(latest_consensus_state_tm.timestamp)?;
 
     if client_state.expired(time_elapsed) {
-        Err(anyhow::anyhow!("client is expired"))
+        if client_state.allow_update.after_expiry {
+            tracing::warn!(
+                %client_id,
+                ?time_elapsed,
+                "client is expired but allow_update.after_expiry is set, permitting update"
+            );
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("client is expired"))
+        }
     } else {
         Ok(())
     }
