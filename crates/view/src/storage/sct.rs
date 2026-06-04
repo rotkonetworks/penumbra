@@ -283,6 +283,34 @@ impl Write for TreeStore<'_, '_> {
             .execute((&start, &end, &below_height))
             .context("failed to delete hashes")?;
 
+        // Per `tct::storage::Write::delete_range` contract: also delete every
+        // Commitment whose position is within the range. The in-memory
+        // backend (crates/crypto/tct/src/storage/in_memory.rs) does this, but
+        // the SQLite backend previously did not, leaving forgotten
+        // commitments in `sct_commitments` indefinitely.
+        //
+        // On reload, `Tree::from_reader` rebuilds the in-memory index from
+        // every row in `sct_commitments`, but rebuilds the inner tree from
+        // the (correctly garbage-collected) `sct_hashes`. So positions that
+        // had been forgotten end up with an entry in `index` but no witness
+        // data in `inner` — exactly the condition `Tree::witness` panics on
+        // ("commitment must be witnessed because it is indexed").
+        //
+        // Observable downstream effect on a relayer: after ~1 hour of normal
+        // operation against pd 2.0.6, the wallet planner picks a fee note,
+        // the view service computes an SCT root from the (corrupted) inner
+        // tree, builds a spend proof against that root, submits the tx, and
+        // pd rejects with "check_stateless failed: a spend proof did not
+        // verify" because the local root no longer matches a valid on-chain
+        // SCT root.
+        self.0
+            .prepare_cached(
+                "DELETE FROM sct_commitments WHERE position >= ?1 AND position < ?2",
+            )
+            .context("failed to prepare commitment delete")?
+            .execute((&start, &end))
+            .context("failed to delete commitments")?;
+
         Ok(())
     }
 }
