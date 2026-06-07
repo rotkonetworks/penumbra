@@ -1253,12 +1253,37 @@ impl Storage {
     }
 
     pub async fn record_empty_block(&self, height: u64) -> anyhow::Result<()> {
+        // Diagnostic: capture both in-memory and on-disk views of sync_height
+        // so we can tell which one is returning a stale value.
+        let uncommitted_at_call = *self.uncommitted_height.lock();
+        let db_at_call: Option<u64> = {
+            let pool = self.pool.clone();
+            spawn_blocking(move || -> anyhow::Result<Option<u64>> {
+                let h: Option<i64> = pool
+                    .get()?
+                    .prepare_cached("SELECT height FROM sync_height ORDER BY height DESC LIMIT 1")?
+                    .query_row([], |row| row.get::<_, Option<i64>>(0))?;
+                Ok(h.and_then(|x| u64::try_from(x).ok()))
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+        };
+
         // Check that the incoming block height follows the latest recorded height
         let last_sync_height = self.last_sync_height().await?.ok_or_else(|| {
             anyhow::anyhow!("invalid: tried to record empty block as genesis block")
         })?;
 
         if height != last_sync_height + 1 {
+            tracing::error!(
+                height,
+                last_sync_height,
+                ?uncommitted_at_call,
+                ?db_at_call,
+                "DIAGNOSTIC record_empty_block stale read"
+            );
             anyhow::bail!(
                 "Wrong block height {} for latest sync height {}",
                 height,
@@ -1662,6 +1687,11 @@ impl Storage {
             // Record block height as latest synced height
             let latest_sync_height = filtered_block.height as i64;
             dbtx.execute("UPDATE sync_height SET height = ?1", [latest_sync_height])?;
+
+            tracing::info!(
+                committed_height = latest_sync_height,
+                "DIAGNOSTIC record_block UPDATE sync_height"
+            );
 
             // Commit the changes to the database
             dbtx.commit()?;
