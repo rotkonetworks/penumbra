@@ -52,7 +52,10 @@ a chain restarted at that height can never advance. Restarting one height
 later sidesteps this entirely, and no vote from the halted chain can ever be
 used as evidence against a validator on the restarted chain. **There is no
 CometBFT block 12,598,601.** Block explorers and reindexers will see a gap of
-one block; application state and compact blocks are continuous.
+one block; application state and compact blocks are continuous. Likewise, the
+validator state change events for iqlusion and Tessellated were emitted inside
+the migration and appear in no block: indexers will see two delegation pools
+start unbonding without a corresponding event.
 
 ### Post-restart validator set
 

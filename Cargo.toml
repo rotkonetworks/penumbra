@@ -92,7 +92,7 @@ allow-branch = ["*"]
 authors    = ["Penumbra Labs <team@penumbralabs.xyz"]
 edition    = "2021"
 version    = "2.1.2"
-repository = "https://github.com/penumbra-zone/penumbra"
+repository = "https://github.com/rotkonetworks/penumbra"
 homepage   = "https://penumbra.zone"
 license    = "MIT OR Apache-2.0"
 
