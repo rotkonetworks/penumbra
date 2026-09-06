@@ -165,6 +165,19 @@ pub enum MigrateCommand {
         #[clap(long, value_name = "VERSION")]
         target_app_version: Option<u64>,
     },
+    /// Restart `penumbra-1` after the September 2026 liveness halt.
+    ///
+    /// Produces a new checkpoint genesis at height 12,598,601 in which the
+    /// validators that were absent from consensus are disabled, so the
+    /// remaining validators hold all of the voting power. Every parameter is
+    /// compiled in; compare the printed root hash with the release notes.
+    /// Requires `--force`, because the chain was never halted by governance.
+    RestartMainnet1 {
+        /// Rehearsal only: JSON plan overriding the compiled-in one (fresh
+        /// consensus keys, different chain id). Never use this on mainnet.
+        #[clap(long, value_name = "FILE", hide = true)]
+        unsafe_test_plan: Option<PathBuf>,
+    },
     /// Perform a no-op migration that resets the halt bit and produces a new genesis.
     NoOp {
         /// Optional app version to set during migration.

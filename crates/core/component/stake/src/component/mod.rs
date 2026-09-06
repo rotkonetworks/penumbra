@@ -1,6 +1,7 @@
 pub mod action_handler;
 mod epoch_handler;
 pub mod metrics;
+pub mod restart;
 pub mod rpc;
 pub mod stake;
 pub mod validator_handler;

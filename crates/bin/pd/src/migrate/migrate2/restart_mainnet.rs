@@ -1,0 +1,349 @@
+//! `restart-mainnet-1`: coordinated restart of `penumbra-1` after the
+//! liveness halt of 2026-09-02 at height 12,598,600.
+//!
+//! The chain stopped because validators holding more than one third of the
+//! voting power went offline, so no block could reach a two-thirds precommit.
+//! Nothing about the application state is wrong. This migration produces a
+//! new checkpoint genesis at height 12,598,601 in which the absent validators
+//! are `Disabled`, so the remaining validators hold 100% of the voting power
+//! and can produce blocks again. It also bumps the app version to the one
+//! compiled into this binary, so the restart doubles as the 2.1 upgrade.
+//!
+//! Every parameter that affects the resulting state or genesis is compiled in.
+//! Operators run exactly one command and compare the printed root hash with
+//! the release notes. The hidden `--unsafe-test-plan` flag exists only for
+//! rehearsing the procedure on a private copy of the chain state with fresh
+//! consensus keys and a different chain id.
+
+use std::path::Path;
+
+use anyhow::{bail, ensure, Context, Result};
+use cnidarium::{StateDelta, Storage};
+use jmt::RootHash;
+use penumbra_sdk_app::app::StateReadExt as _;
+use penumbra_sdk_app::app::StateWriteExt as _;
+use penumbra_sdk_app::{APP_VERSION, SUBSTORE_PREFIXES};
+use penumbra_sdk_sct::component::clock::EpochRead;
+use penumbra_sdk_stake::component::restart::RestartStateWrite;
+use penumbra_sdk_stake::component::validator_handler::ValidatorDataRead;
+use penumbra_sdk_stake::component::ConsensusIndexRead;
+use penumbra_sdk_stake::validator::State as ValidatorState;
+use penumbra_sdk_stake::CurrentConsensusKeys;
+use serde::Deserialize;
+use tendermint::PublicKey;
+
+use super::framework::Migration;
+
+/// Height of the last block committed on `penumbra-1` before the halt.
+pub const EXPECTED_PRE_UPGRADE_HEIGHT: u64 = 12_598_600;
+
+/// App-state root hash at [`EXPECTED_PRE_UPGRADE_HEIGHT`]. `None` until it
+/// has been recorded from a verified node; once set, the migration refuses
+/// to run on any other state.
+pub const EXPECTED_PRE_UPGRADE_ROOT_HASH: Option<&str> = None;
+
+/// Genesis time of the restarted chain. CometBFT will not start proposing
+/// before this instant, so it doubles as the coordinated start time. Every
+/// operator must produce a genesis with this exact value, or their node is on
+/// a different chain.
+pub const GENESIS_START: &str = "2026-09-08T12:00:00Z";
+
+/// Validators absent from consensus at height 12,598,601, identified by their
+/// CometBFT ed25519 consensus public key (base64, as shown by `/validators`).
+pub const ABSENT_VALIDATORS: &[(&str, &str)] = &[
+    ("iqlusion", "HSuFV7cxLkwVQ4XVgzbIkE7aNkaTO/KF4Vlhex/r32A="),
+    (
+        "Tessellated",
+        "lNC3joFWZ2m8QHOEUigOormsSUmGjS0ADGHjUacO7PM=",
+    ),
+];
+
+/// A consensus-key replacement, used only when rehearsing on a private copy.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Rekey {
+    /// Existing consensus key (base64 ed25519).
+    pub old: String,
+    /// Replacement consensus key (base64 ed25519).
+    pub new: String,
+}
+
+/// What the migration does to the validator set.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RestartPlan {
+    /// Refuse to run unless the local state is at exactly this height.
+    pub expected_pre_upgrade_height: u64,
+    /// Refuse to run unless the local state has exactly this root hash (hex).
+    #[serde(default)]
+    pub expected_pre_upgrade_root_hash: Option<String>,
+    /// Consensus keys (base64 ed25519) of validators to disable.
+    pub disable: Vec<String>,
+    /// Testing only: disable every validator in the consensus set that is not
+    /// being rekeyed, so the rehearsal set consists of the rekeyed nodes alone.
+    #[serde(default)]
+    pub disable_all_others: bool,
+    /// Testing only: consensus-key replacements.
+    #[serde(default)]
+    pub rekey: Vec<Rekey>,
+    /// Testing only: chain id of the rehearsal network.
+    #[serde(default)]
+    pub chain_id: Option<String>,
+    /// Testing only: genesis time override (RFC 3339).
+    #[serde(default)]
+    pub genesis_time: Option<String>,
+}
+
+impl RestartPlan {
+    /// The compiled-in plan for `penumbra-1`.
+    pub fn mainnet_1() -> Self {
+        Self {
+            expected_pre_upgrade_height: EXPECTED_PRE_UPGRADE_HEIGHT,
+            expected_pre_upgrade_root_hash: EXPECTED_PRE_UPGRADE_ROOT_HASH.map(str::to_owned),
+            disable: ABSENT_VALIDATORS
+                .iter()
+                .map(|(_, key)| (*key).to_owned())
+                .collect(),
+            disable_all_others: false,
+            rekey: vec![],
+            chain_id: None,
+            genesis_time: None,
+        }
+    }
+
+    /// Load a rehearsal plan from a JSON file.
+    pub fn from_test_file(path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading test plan {}", path.display()))?;
+        let plan: Self = serde_json::from_str(&raw).context("parsing test plan JSON")?;
+        Ok(plan)
+    }
+
+    /// The genesis time this plan produces.
+    pub fn genesis_start(&self) -> Result<tendermint::time::Time> {
+        let raw = self.genesis_time.as_deref().unwrap_or(GENESIS_START);
+        raw.parse::<tendermint::time::Time>()
+            .with_context(|| format!("invalid genesis time {raw:?}"))
+    }
+}
+
+fn parse_consensus_key(b64: &str) -> Result<PublicKey> {
+    serde_json::from_value(serde_json::json!({
+        "type": "tendermint/PubKeyEd25519",
+        "value": b64,
+    }))
+    .with_context(|| format!("invalid ed25519 consensus key {b64:?}"))
+}
+
+pub struct RestartMainnet1Migration {
+    plan: RestartPlan,
+    unsafe_test: bool,
+}
+
+impl RestartMainnet1Migration {
+    pub fn new(plan: RestartPlan, unsafe_test: bool) -> Self {
+        Self { plan, unsafe_test }
+    }
+}
+
+impl Migration for RestartMainnet1Migration {
+    fn name(&self) -> &'static str {
+        "restart-mainnet-1"
+    }
+
+    fn target_app_version(&self) -> Option<u64> {
+        Some(APP_VERSION)
+    }
+
+    /// Same as the default, plus a hard check that the local state is the
+    /// state this migration was written and tested against.
+    async fn prepare(
+        &self,
+        pd_home: &std::path::PathBuf,
+        _comet_home: Option<&std::path::PathBuf>,
+    ) -> Result<(RootHash, u64)> {
+        let storage = Storage::load(pd_home.join("rocksdb"), SUBSTORE_PREFIXES.to_vec()).await?;
+        let state = storage.latest_snapshot();
+        let root_hash: RootHash = state
+            .root_hash()
+            .await
+            .expect("chain state has a root hash")
+            .into();
+        let height = state
+            .get_block_height()
+            .await
+            .expect("chain state has a block height");
+        storage.release().await;
+
+        ensure!(
+            height == self.plan.expected_pre_upgrade_height,
+            "local state is at height {height}, but this restart is defined at height {}; \
+             do not run it on any other state",
+            self.plan.expected_pre_upgrade_height
+        );
+        if let Some(expected) = &self.plan.expected_pre_upgrade_root_hash {
+            let actual = hex::encode(root_hash.0);
+            ensure!(
+                actual.eq_ignore_ascii_case(expected),
+                "local state root hash {actual} does not match the expected {expected}; \
+                 your node's state differs from the network's at height {height}"
+            );
+        }
+        Ok((root_hash, height))
+    }
+
+    async fn migrate_inner(&self, delta: &mut StateDelta<cnidarium::Snapshot>) -> Result<()> {
+        let plan = &self.plan;
+        let testing_fields_used = plan.disable_all_others
+            || !plan.rekey.is_empty()
+            || plan.chain_id.is_some()
+            || plan.genesis_time.is_some();
+        ensure!(
+            self.unsafe_test || !testing_fields_used,
+            "rehearsal-only plan fields used outside of --unsafe-test-plan"
+        );
+
+        if let Some(chain_id) = &plan.chain_id {
+            let old = delta.get_chain_id().await?;
+            tracing::warn!(%old, new = %chain_id, "REHEARSAL: overriding chain id");
+            delta.put_chain_id(chain_id.clone());
+        }
+
+        let to_disable = plan
+            .disable
+            .iter()
+            .map(|k| parse_consensus_key(k))
+            .collect::<Result<Vec<_>>>()?;
+        let rekeys = plan
+            .rekey
+            .iter()
+            .map(|r| Ok((parse_consensus_key(&r.old)?, parse_consensus_key(&r.new)?)))
+            .collect::<Result<Vec<(PublicKey, PublicKey)>>>()?;
+
+        // Walk the consensus set: everything CometBFT could be told about.
+        let consensus_set = delta.get_consensus_set().await?;
+        ensure!(!consensus_set.is_empty(), "consensus set index is empty");
+
+        let mut disabled_keys: Vec<PublicKey> = Vec::new();
+        let mut found_listed = 0usize;
+        let mut remaining_power: u128 = 0;
+        let mut remaining: Vec<(String, u128)> = Vec::new();
+
+        for identity_key in &consensus_set {
+            let validator = delta
+                .get_validator_definition(identity_key)
+                .await?
+                .with_context(|| format!("no definition for {identity_key}"))?;
+            let state = delta
+                .get_validator_state(identity_key)
+                .await?
+                .with_context(|| format!("no state for {identity_key}"))?;
+            let power: u128 = delta
+                .get_validator_power(identity_key)
+                .await?
+                .unwrap_or_default()
+                .value();
+            let consensus_key = validator.consensus_key;
+
+            let listed = to_disable.contains(&consensus_key);
+            let rekeyed = rekeys.iter().any(|(old, _)| *old == consensus_key);
+            if listed {
+                found_listed += 1;
+            }
+            let should_disable = listed || (plan.disable_all_others && !rekeyed);
+
+            if should_disable {
+                match state {
+                    ValidatorState::Disabled => {
+                        tracing::info!(name = %validator.name, %identity_key, "already disabled");
+                    }
+                    ValidatorState::Tombstoned => {
+                        tracing::info!(name = %validator.name, %identity_key, "tombstoned; nothing to do");
+                    }
+                    _ => {
+                        let (old, new) = delta.restart_disable_validator(identity_key).await?;
+                        tracing::info!(
+                            name = %validator.name,
+                            %identity_key,
+                            ?old,
+                            ?new,
+                            power,
+                            "validator removed from consensus"
+                        );
+                        disabled_keys.push(consensus_key);
+                    }
+                }
+                if matches!(state, ValidatorState::Active) {
+                    // It had real voting power; make sure InitChain never sees it.
+                    if !disabled_keys.contains(&consensus_key) {
+                        disabled_keys.push(consensus_key);
+                    }
+                }
+            } else if matches!(state, ValidatorState::Active) {
+                remaining_power += power;
+                remaining.push((validator.name.clone(), power));
+            }
+        }
+
+        ensure!(
+            found_listed == to_disable.len(),
+            "only {found_listed} of the {} listed consensus keys were found in the consensus set; \
+             this is not the state this migration was written for",
+            to_disable.len()
+        );
+
+        for (old, new) in &rekeys {
+            let identity_key = delta
+                .lookup_identity_key_by_consensus_key(old)
+                .await
+                .with_context(|| format!("no validator with consensus key {old:?}"))?;
+            tracing::warn!(%identity_key, "REHEARSAL: replacing consensus key");
+            delta.restart_rekey_validator(&identity_key, *new).await?;
+        }
+
+        // The staking component reports every key in this record to CometBFT at
+        // InitChain, including zero-power ones, and CometBFT panics on a genesis
+        // validator with zero power. Rewrite it to the validators that keep power.
+        let current = delta.restart_get_consensus_keys().await?;
+        let before = current.consensus_keys.len();
+        let consensus_keys: Vec<PublicKey> = current
+            .consensus_keys
+            .into_iter()
+            .filter(|k| !disabled_keys.contains(k))
+            .map(|k| {
+                rekeys
+                    .iter()
+                    .find(|(old, _)| *old == k)
+                    .map(|(_, new)| *new)
+                    .unwrap_or(k)
+            })
+            .collect();
+        ensure!(
+            !consensus_keys.is_empty(),
+            "no validators would remain in the consensus set"
+        );
+        tracing::info!(
+            before,
+            after = consensus_keys.len(),
+            "rewrote the consensus keys reported to CometBFT"
+        );
+        delta.restart_put_consensus_keys(CurrentConsensusKeys { consensus_keys });
+
+        remaining.sort_by(|a, b| b.1.cmp(&a.1));
+        for (name, power) in &remaining {
+            tracing::info!(
+                name = %name,
+                power,
+                share = format!("{:.2}%", 100.0 * *power as f64 / remaining_power as f64),
+                "validator keeps voting power"
+            );
+        }
+        tracing::info!(
+            validators = remaining.len(),
+            total_power = remaining_power,
+            "post-restart active set"
+        );
+        if remaining.is_empty() {
+            bail!("no active validators would remain");
+        }
+        Ok(())
+    }
+}

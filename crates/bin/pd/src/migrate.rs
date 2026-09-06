@@ -8,7 +8,7 @@ mod mainnet1;
 mod mainnet2;
 mod mainnet3;
 mod mainnet4;
-mod migrate2;
+pub mod migrate2;
 mod reset_halt_bit;
 mod simple;
 mod testnet72;
@@ -84,6 +84,13 @@ pub enum Migration {
     /// No-op migration
     /// - Resets halt bit and produces new genesis without state changes
     NoOp,
+    /// Restart of `penumbra-1` after the 2026-09-02 liveness halt:
+    /// - Disables the validators absent from consensus so the rest hold 100% of the power
+    /// - Bumps the app version to the compiled-in one (this is also the 2.1 upgrade)
+    RestartMainnet1 {
+        plan: migrate2::restart_mainnet::RestartPlan,
+        unsafe_test: bool,
+    },
 }
 
 impl Migration {
@@ -187,6 +194,17 @@ impl Migration {
                 migration
                     .run(pd_home.clone(), comet_home.clone(), genesis_start)
                     .await?;
+                // Early return since the new framework handles genesis generation.
+                return Ok(());
+            }
+            Migration::RestartMainnet1 { plan, unsafe_test } => {
+                storage.release().await;
+                migrate2::restart_mainnet::RestartMainnet1Migration::new(
+                    plan.clone(),
+                    *unsafe_test,
+                )
+                .run(pd_home.clone(), comet_home.clone(), genesis_start)
+                .await?;
                 // Early return since the new framework handles genesis generation.
                 return Ok(());
             }

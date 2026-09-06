@@ -502,6 +502,32 @@ async fn main() -> anyhow::Result<()> {
                         .context("failed to disable halt bit in local state")?;
                     exit(0)
                 }
+                Some(MigrateCommand::RestartMainnet1 { unsafe_test_plan }) => {
+                    use pd::migrate::migrate2::restart_mainnet::RestartPlan;
+                    let (plan, unsafe_test) = match unsafe_test_plan {
+                        Some(path) => {
+                            tracing::warn!(
+                                ?path,
+                                "REHEARSAL MODE: using a test plan, not the mainnet plan"
+                            );
+                            (RestartPlan::from_test_file(&path)?, true)
+                        }
+                        None => (RestartPlan::mainnet_1(), false),
+                    };
+                    let genesis_start = plan.genesis_start()?;
+                    tracing::info!(
+                        expected_height = plan.expected_pre_upgrade_height,
+                        %genesis_start,
+                        disable = ?plan.disable,
+                        "performing restart-mainnet-1 migration"
+                    );
+                    pd::migrate::Migration::RestartMainnet1 { plan, unsafe_test }
+                        .migrate(pd_home, comet_home, Some(genesis_start), force)
+                        .instrument(pd_migrate_span)
+                        .await
+                        .context("failed to perform restart-mainnet-1 migration")?;
+                    exit(0)
+                }
                 Some(MigrateCommand::IbcRecovery {
                     old_client_id,
                     new_client_id,
