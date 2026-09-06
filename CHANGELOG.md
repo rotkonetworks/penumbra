@@ -75,6 +75,34 @@ restore the database.
 Expect a pruned validator to use about 90 GB in total. See `docs/pruning.md`
 for the full policy.
 
+### Security: dependency advisories
+
+`cargo audit` against the 2.0.7 lockfile reported 26 RustSec advisories. The
+ones fixable without breaking changes on the Rust 1.83 toolchain this series
+pins are patched in this release:
+
+* `h2` 0.4.7 to 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames). This is
+  the HTTP/2 implementation under `pd`'s public gRPC endpoint, so it is the one
+  RPC operators should care about.
+* `bytes` 1.9.0 to 1.12.1 (RUSTSEC-2026-0007, integer overflow in `reserve`).
+* `openssl` 0.10.64 to 0.10.81 (RUSTSEC-2024-0357, 2025-0004, 2025-0022).
+* `ring` 0.17.8 to 0.17.14 (RUSTSEC-2025-0009).
+* `tar` 0.4.41 to 0.4.46 (RUSTSEC-2026-0067, 2026-0068).
+* `aws-lc-sys` 0.25.0 to 0.41.0 (RUSTSEC-2026-0045 to 0048); only used by the
+  optional `--grpc-auto-https` TLS termination.
+* `crossbeam-epoch` 0.9.18 to 0.9.21, `tracing-subscriber` 0.3.18 to 0.3.20,
+  `rustls` 0.23.21 to 0.23.23.
+
+Still open, all requiring either a semver-breaking upgrade or a newer Rust
+toolchain than 1.83, and tracked for the next release: `rustls-webpki` 0.101
+and 0.102 (only reachable through `--grpc-auto-https`), `h2` 0.3 (legacy
+`hyper` 0.14 path), `time` 0.3.44 (0.3.45+ needs cargo 1.85), `idna` 0.5,
+`tracing-subscriber` 0.2 (via `ledger-lib`), and `rsa` 0.9 (no upstream fix;
+not linked into `pd`).
+
+CometBFT: run `v0.37.18` or later. It fixes CSA-2026-001 (critical) and
+ASA-2025-003. Note the `0.37.18` binary reports itself as `0.37.16`.
+
 ### Also in this release
 
 * `pcli`: honor `--source` when selecting positions in `close-all` and
