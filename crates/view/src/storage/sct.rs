@@ -304,9 +304,7 @@ impl Write for TreeStore<'_, '_> {
         // verify" because the local root no longer matches a valid on-chain
         // SCT root.
         self.0
-            .prepare_cached(
-                "DELETE FROM sct_commitments WHERE position >= ?1 AND position < ?2",
-            )
+            .prepare_cached("DELETE FROM sct_commitments WHERE position >= ?1 AND position < ?2")
             .context("failed to prepare commitment delete")?
             .execute((&start, &end))
             .context("failed to delete commitments")?;
