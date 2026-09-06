@@ -25,27 +25,29 @@ root hash and synced live mainnet blocks.
 
 #### How to prune a validator
 
-Prune validators **one at a time**. The node is offline for about an hour
-while the prune runs. Taking more than a third of voting power offline at once
-halts the chain.
+Prune validators **one at a time**. The node is offline while the prune runs:
+about an hour on NVMe for a mainnet store, longer on slower disks. Taking more
+than a third of voting power offline at once halts the chain.
 
 1. Install the `pd` 2.0.8 binary (see below). It is a drop-in replacement.
 2. Make sure at least 35 GB is free next to the `pd` data directory.
-3. Stop `pd`. CometBFT may keep running; it will wait.
+3. Stop both services. CometBFT exits when its ABCI connection to `pd` goes
+   away, and under systemd it would otherwise crash-loop for the duration.
    ```sh
-   sudo systemctl stop penumbra
+   sudo systemctl stop cometbft penumbra
    ```
-4. Run the prune. `--home` is the `pd` home, the directory that contains
-   `rocksdb`. If `PENUMBRA_PD_HOME` is set in the unit's environment, `--home`
-   can be omitted.
+4. Run the prune as the user that owns the `pd` data directory, with a raised
+   open-file limit. `--home` is the `pd` home, the directory that contains
+   `rocksdb`. Always pass it explicitly.
    ```sh
-   pd migrate --home /path/to/node0/pd prune
+   sudo -u penumbra bash -c 'ulimit -n 65536; pd migrate --home /path/to/node0/pd prune'
    ```
    The log ends with `JMT pruning complete root_hash=...`. That root hash must
    match the one printed at the start in `starting JMT pruning`.
-5. Start `pd` and confirm it is signing again.
+5. Start `pd` first, then CometBFT, and confirm the node is signing again.
    ```sh
    sudo systemctl start penumbra
+   sudo systemctl start cometbft
    ```
 6. The unpruned database is kept at `<pd home>/rocksdb_old`. Once the node has
    been signing for a while, remove it to reclaim the space:
@@ -60,9 +62,6 @@ Options: `--chunk-size N` (default 100000) trades memory for proof work;
 If the prune is interrupted, nothing is lost. Both `pd migrate prune` and
 `pd start` detect an interrupted directory swap and print the exact command to
 restore the database.
-
-If you run the prune outside the systemd unit, raise the open-file limit first
-(`ulimit -n 65536`).
 
 #### What is not pruned, on purpose
 
