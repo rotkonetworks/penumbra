@@ -37,10 +37,12 @@ use super::framework::Migration;
 /// Height of the last block committed on `penumbra-1` before the halt.
 pub const EXPECTED_PRE_UPGRADE_HEIGHT: u64 = 12_598_600;
 
-/// App-state root hash at [`EXPECTED_PRE_UPGRADE_HEIGHT`]. `None` until it
-/// has been recorded from a verified node; once set, the migration refuses
-/// to run on any other state.
-pub const EXPECTED_PRE_UPGRADE_ROOT_HASH: Option<&str> = None;
+/// App-state root hash at [`EXPECTED_PRE_UPGRADE_HEIGHT`], as reported by
+/// `last_block_app_hash` in `/abci_info` on every node that reached the halt
+/// (confirmed on rotko's validator and on polkachu's RPC node). The migration
+/// refuses to run on any other state.
+pub const EXPECTED_PRE_UPGRADE_ROOT_HASH: Option<&str> =
+    Some("6fd4f811f8e1fcc2c67d7ea2ccc75cef228acc2b9a738b8514c9e163c5cd859a");
 
 /// Genesis time of the restarted chain. CometBFT will not start proposing
 /// before this instant, so it doubles as the coordinated start time. Every
