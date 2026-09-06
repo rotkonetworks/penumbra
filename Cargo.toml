@@ -243,6 +243,6 @@ getrandom                        = { version = "0.2", default-features = false }
 # and will fail to build.
 ledger-proto = { git = "https://github.com/ledger-community/rust-ledger", rev = "510bb3ca30639af4bdb12a918b6bbbdb75fa5f52" }
 # JMT pruning support: cnidarium 0.84 on crates.io lacks the pruning API.
-# Pinned to the head of https://github.com/penumbra-zone/cnidarium/pull/12 (erwan/tree_pruning).
-# Drop this patch once cnidarium@0.85 is released with pruning included.
-cnidarium = { git = "https://github.com/penumbra-zone/cnidarium", rev = "6b75a603e8119a8219aeee3f8162bb3465c958e4" }
+# Upstream (penumbra-zone/cnidarium#12, erwan/tree_pruning) is unmaintained; we carry it on our fork.
+# Branch rotko/tree-pruning-tests = PR-12 head (6b75a60) + SubstoreConfig export fix + integration tests.
+cnidarium = { git = "https://github.com/rotkonetworks/cnidarium", rev = "7865020a6dff2a630e5156cc8807f0b5972f6092" }
