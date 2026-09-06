@@ -44,6 +44,24 @@ an empty list).
    handful of nodes, erasure coding or sharding history is pointless.
    Replication across all core validators is the archive.
 
+## Upgrades destroy block history; the reindexer archive is the real history
+
+At a consensus upgrade, `pd migrate` writes a new genesis whose
+`initial_height` is the upgrade height and then deletes CometBFT's data
+directory, blockstore included, on every node. After an upgrade no node holds
+any block from the previous era. "Keep all blocks" therefore only ever means
+"all blocks since the last upgrade", and the permanent history of the chain is
+the sequence of `penumbra-reindexer` archives, one per era.
+
+Rules:
+
+1. Run `penumbra-reindexer archive` continuously against an unpruned node
+   (`penumbra.rotko.net`) so the current era is captured as it grows.
+2. Before any upgrade, and before anyone runs `pd migrate`, finalize and
+   publish the archive for the ending era, keep a copy of the pre-upgrade `pd`
+   data directory, and publish the post-upgrade `pd` state snapshot that new
+   nodes need to join a chain whose genesis starts mid-history.
+
 ## Cost of this policy
 
 A JMT-pruned node carries about 90 GB instead of about 380 GB, and CometBFT
