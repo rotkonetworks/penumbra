@@ -172,6 +172,7 @@ pub enum MigrateCommand {
     /// remaining validators hold all of the voting power. Every parameter is
     /// compiled in; compare the printed root hash with the release notes.
     /// Requires `--force`, because the chain was never halted by governance.
+    #[clap(name = "restart-mainnet-1")]
     RestartMainnet1 {
         /// Rehearsal only: JSON plan overriding the compiled-in one (fresh
         /// consensus keys, different chain id). Never use this on mainnet.
