@@ -94,7 +94,7 @@ pub enum Migration {
 }
 
 impl Migration {
-    #[instrument(skip(pd_home, genesis_start, force))]
+    #[instrument(skip_all)]
     pub async fn migrate(
         &self,
         pd_home: PathBuf,
@@ -106,7 +106,7 @@ impl Migration {
             .await
     }
 
-    #[instrument(skip(pd_home, genesis_start, force, params))]
+    #[instrument(skip_all)]
     pub async fn migrate_with_params(
         &self,
         pd_home: PathBuf,
