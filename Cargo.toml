@@ -239,6 +239,10 @@ url                              = { version = "2.2" }
 getrandom                        = { version = "0.2", default-features = false }
 
 [patch.crates-io]
+# JMT pruning support: cnidarium 0.83 on crates.io lacks the pruning API.
+# Upstream (penumbra-zone/cnidarium#12) is unmaintained; we carry it on our fork
+# as 0.83.1 on branch release/v0.83.x (pruning commits + SubstoreConfig fix + tests).
+cnidarium = { git = "https://github.com/rotkonetworks/cnidarium", rev = "e37da88a770503384396d625449128643872e1ea" }
 # Without this, the git dependency for ledger-lib will depend on the crates.io v0.1 version,
 # and will fail to build.
 ledger-proto = { git = "https://github.com/ledger-community/rust-ledger", rev = "510bb3ca30639af4bdb12a918b6bbbdb75fa5f52" }
