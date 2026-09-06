@@ -349,23 +349,11 @@ fn adjust_priv_validator_state(comet_home: &Path, initial_height: u64) -> anyhow
             &priv_validator_state,
             &serde_json::to_string_pretty(&new_state)?,
         )?;
-    } else if current_height == initial_height {
-        // The validator already signed votes at `initial_height` on the halted
-        // chain (for example during the rounds that never reached a commit).
-        // Leaving the file untouched keeps CometBFT's double-sign protection
-        // intact: the node will abstain from rounds it has already signed for
-        // and vote from the next round onwards. Never lower this file by hand.
-        tracing::warn!(
-            round = %current_state["round"],
-            step = %current_state["step"],
-            "priv_validator_state is already at initial_height {}; leaving it untouched, \
-             this validator will only sign from the next round at that height",
-            initial_height
-        );
     } else {
         anyhow::bail!(
-            "priv_validator_state height {} is greater than initial_height {}: \
-             this signing key has already been used on a chain past this point",
+            "priv_validator_state height {} is greater than or equal to initial_height {}: \
+             this signing key already signed at or beyond the new chain's first height. \
+             Do not edit the file by hand; stop and ask for help",
             current_height,
             initial_height
         );

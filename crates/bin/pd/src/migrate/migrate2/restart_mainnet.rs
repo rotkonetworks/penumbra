@@ -3,11 +3,29 @@
 //!
 //! The chain stopped because validators holding more than one third of the
 //! voting power went offline, so no block could reach a two-thirds precommit.
-//! Nothing about the application state is wrong. This migration produces a
-//! new checkpoint genesis at height 12,598,601 in which the absent validators
-//! are `Disabled`, so the remaining validators hold 100% of the voting power
-//! and can produce blocks again. It also bumps the app version to the one
-//! compiled into this binary, so the restart doubles as the 2.1 upgrade.
+//! Nothing about the application state is wrong. This migration:
+//!
+//! 1. marks the absent validators `Disabled`, so the remaining validators hold
+//!    100% of the voting power;
+//! 2. executes an **empty application block 12,598,601** itself, through the
+//!    same `App::begin_block` / `end_block` / `commit` path `pd` uses for every
+//!    block, with a fixed header;
+//! 3. writes a checkpoint genesis whose `initial_height` is **12,598,602**.
+//!
+//! Step 2 exists because every validator that was online at the halt already
+//! signed votes for height 12,598,601 (rounds 0 to 2) on the halted chain.
+//! CometBFT's double-sign protection will not let them sign those rounds
+//! again, and a round only advances on two-thirds of votes, so a chain
+//! restarted at 12,598,601 can never produce a block. Restarting at 12,598,602
+//! sidesteps the signed rounds entirely, and no vote from the halted chain
+//! can ever be turned into evidence against a validator on the new chain,
+//! because the halted chain never had a height 12,598,602. Executing the empty
+//! block inside the migration keeps the application state and the compact
+//! block stream contiguous, so wallets keep syncing. There is simply no
+//! CometBFT block 12,598,601.
+//!
+//! It also bumps the app version to the one compiled into this binary, so the
+//! restart doubles as the 2.1 upgrade.
 //!
 //! Every parameter that affects the resulting state or genesis is compiled in.
 //! Operators run exactly one command and compare the printed root hash with
@@ -20,16 +38,22 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context, Result};
 use cnidarium::{StateDelta, Storage};
 use jmt::RootHash;
+use penumbra_sdk_app::app::App;
 use penumbra_sdk_app::app::StateReadExt as _;
 use penumbra_sdk_app::app::StateWriteExt as _;
+use penumbra_sdk_app::app_version::migrate_app_version;
 use penumbra_sdk_app::{APP_VERSION, SUBSTORE_PREFIXES};
-use penumbra_sdk_sct::component::clock::EpochRead;
+use penumbra_sdk_governance::StateWriteExt as _;
+use penumbra_sdk_sct::component::clock::{EpochManager, EpochRead};
 use penumbra_sdk_stake::component::restart::RestartStateWrite;
 use penumbra_sdk_stake::component::validator_handler::ValidatorDataRead;
 use penumbra_sdk_stake::component::ConsensusIndexRead;
 use penumbra_sdk_stake::validator::State as ValidatorState;
 use penumbra_sdk_stake::CurrentConsensusKeys;
 use serde::Deserialize;
+use tendermint::abci::request;
+use tendermint::abci::types::{BlockSignatureInfo, CommitInfo, Validator, VoteInfo};
+use tendermint::block::BlockIdFlag;
 use tendermint::PublicKey;
 
 use super::framework::Migration;
@@ -43,6 +67,11 @@ pub const EXPECTED_PRE_UPGRADE_HEIGHT: u64 = 12_598_600;
 /// refuses to run on any other state.
 pub const EXPECTED_PRE_UPGRADE_ROOT_HASH: Option<&str> =
     Some("6fd4f811f8e1fcc2c67d7ea2ccc75cef228acc2b9a738b8514c9e163c5cd859a");
+
+/// Timestamp of the empty application block 12,598,601 executed by the
+/// migration. Five seconds after the last real block (2026-09-02T19:37:07Z),
+/// and before [`GENESIS_START`].
+pub const SYNTHETIC_BLOCK_TIME: &str = "2026-09-02T19:37:12Z";
 
 /// Genesis time of the restarted chain. CometBFT will not start proposing
 /// before this instant, so it doubles as the coordinated start time. Every
@@ -92,6 +121,96 @@ pub struct RestartPlan {
     /// Testing only: genesis time override (RFC 3339).
     #[serde(default)]
     pub genesis_time: Option<String>,
+}
+
+/// A validator that keeps voting power after the restart, as CometBFT sees it.
+struct ActiveValidator {
+    name: String,
+    consensus_key: PublicKey,
+    power: u64,
+}
+
+/// Build the deterministic header of the empty block executed by the migration.
+///
+/// `app_hash` is the application root hash after the validator changes, which
+/// is what a real block at this height would carry. `validators` is the
+/// post-restart active set: both the current and next validator set hash are
+/// derived from it, the way CometBFT would compute them.
+fn synthetic_begin_block(
+    chain_id: &str,
+    height: u64,
+    time: tendermint::Time,
+    app_hash: RootHash,
+    validators: &[ActiveValidator],
+) -> Result<request::BeginBlock> {
+    let infos: Vec<tendermint::validator::Info> = validators
+        .iter()
+        .map(|v| {
+            Ok(tendermint::validator::Info::new(
+                v.consensus_key,
+                tendermint::vote::Power::try_from(v.power).context("voting power")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let validator_set = tendermint::validator::Set::without_proposer(infos);
+    let validators_hash = validator_set.hash();
+
+    // sha256 of the empty string: the hash CometBFT uses for empty commits,
+    // empty transaction lists and empty evidence lists.
+    let empty_hash = tendermint::Hash::Sha256(
+        hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")?
+            .try_into()
+            .expect("32 bytes"),
+    );
+
+    let header = tendermint::block::Header {
+        version: tendermint::block::header::Version {
+            block: 11,
+            app: APP_VERSION,
+        },
+        chain_id: chain_id.parse().context("chain id")?,
+        height: height.try_into().context("height")?,
+        time,
+        last_block_id: None,
+        last_commit_hash: Some(empty_hash),
+        data_hash: Some(empty_hash),
+        validators_hash,
+        next_validators_hash: validators_hash,
+        consensus_hash: empty_hash,
+        app_hash: tendermint::AppHash::try_from(app_hash.0.to_vec()).context("app hash")?,
+        last_results_hash: Some(empty_hash),
+        evidence_hash: Some(empty_hash),
+        // Nobody proposed this block.
+        proposer_address: tendermint::account::Id::new([0u8; 20]),
+    };
+
+    // Count every remaining validator as having signed the previous block, so
+    // the empty block neither rewards nor penalises anyone's uptime.
+    let votes = validators
+        .iter()
+        .map(|v| {
+            Ok(VoteInfo {
+                validator: Validator {
+                    address: tendermint::account::Id::from(v.consensus_key)
+                        .as_bytes()
+                        .try_into()
+                        .expect("20-byte address"),
+                    power: tendermint::vote::Power::try_from(v.power).context("voting power")?,
+                },
+                sig_info: BlockSignatureInfo::Flag(BlockIdFlag::Commit),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(request::BeginBlock {
+        hash: tendermint::Hash::None,
+        header,
+        last_commit_info: CommitInfo {
+            round: 0u8.into(),
+            votes,
+        },
+        byzantine_validators: vec![],
+    })
 }
 
 impl RestartPlan {
@@ -144,6 +263,43 @@ impl RestartMainnet1Migration {
     pub fn new(plan: RestartPlan, unsafe_test: bool) -> Self {
         Self { plan, unsafe_test }
     }
+
+    /// The validators that keep voting power after `migrate_inner`, in the
+    /// order CometBFT will learn them at `InitChain`.
+    async fn active_validators(
+        &self,
+        state: &StateDelta<cnidarium::Snapshot>,
+    ) -> Result<Vec<ActiveValidator>> {
+        let mut active = Vec::new();
+        for identity_key in state.get_consensus_set().await? {
+            let validator = state
+                .get_validator_definition(&identity_key)
+                .await?
+                .with_context(|| format!("no definition for {identity_key}"))?;
+            let validator_state = state
+                .get_validator_state(&identity_key)
+                .await?
+                .with_context(|| format!("no state for {identity_key}"))?;
+            if !matches!(validator_state, ValidatorState::Active) {
+                continue;
+            }
+            let power = state
+                .get_validator_power(&identity_key)
+                .await?
+                .unwrap_or_default()
+                .value();
+            if power == 0 {
+                continue;
+            }
+            active.push(ActiveValidator {
+                name: validator.name,
+                consensus_key: validator.consensus_key,
+                power: u64::try_from(power).context("voting power fits in u64")?,
+            });
+        }
+        ensure!(!active.is_empty(), "no active validators after the changes");
+        Ok(active)
+    }
 }
 
 impl Migration for RestartMainnet1Migration {
@@ -190,6 +346,107 @@ impl Migration for RestartMainnet1Migration {
             );
         }
         Ok((root_hash, height))
+    }
+
+    /// Unlike the default, this runs in three commits:
+    ///
+    /// 1. the validator changes, committed in place at version 12,598,600;
+    /// 2. an empty application block 12,598,601 (version 12,598,601);
+    /// 3. the app version bump, the ready-to-start bit and the height reset
+    ///    that lets CometBFT issue `InitChain`, committed in place.
+    ///
+    /// The returned height is `12,598,602`: the genesis `initial_height`.
+    async fn migrate(
+        &self,
+        pd_home: &std::path::PathBuf,
+        _comet_home: Option<&std::path::PathBuf>,
+    ) -> Result<(RootHash, u64)> {
+        let storage = Storage::load(pd_home.join("rocksdb"), SUBSTORE_PREFIXES.to_vec()).await?;
+        let initial_state = storage.latest_snapshot();
+        let pre_upgrade_height = initial_state
+            .get_block_height()
+            .await
+            .expect("chain state has a block height");
+        let synthetic_height = pre_upgrade_height + 1;
+        let post_upgrade_height = pre_upgrade_height + 2;
+        ensure!(
+            storage.latest_version() == pre_upgrade_height,
+            "state version {} does not match block height {pre_upgrade_height}",
+            storage.latest_version()
+        );
+
+        // 1. Validator set changes and the app version bump.
+        let mut delta = StateDelta::new(initial_state);
+        migrate_app_version(&mut delta, APP_VERSION).await?;
+        self.migrate_inner(&mut delta).await?;
+        let active = self.active_validators(&delta).await?;
+        let chain_id = delta.get_chain_id().await?;
+        let root_after_changes = storage.commit_in_place(delta).await?;
+        tracing::info!(
+            ?root_after_changes,
+            "committed validator changes at height {pre_upgrade_height}"
+        );
+
+        // 2. The empty block.
+        let time: tendermint::Time = SYNTHETIC_BLOCK_TIME
+            .parse()
+            .context("synthetic block time")?;
+        let begin_block = synthetic_begin_block(
+            &chain_id,
+            synthetic_height,
+            time,
+            root_after_changes,
+            &active,
+        )?;
+        tracing::info!(
+            height = synthetic_height,
+            %time,
+            validators_hash = %begin_block.header.validators_hash,
+            "executing the empty application block"
+        );
+        let mut app = App::new(storage.latest_snapshot());
+        let begin_events = app.begin_block(&begin_block).await;
+        let end_events = app
+            .end_block(&request::EndBlock {
+                height: synthetic_height as i64,
+            })
+            .await;
+        let root_after_block = app.commit(storage.clone()).await;
+        ensure!(
+            storage.latest_version() == synthetic_height,
+            "state version {} after the empty block, expected {synthetic_height}",
+            storage.latest_version()
+        );
+        tracing::info!(
+            ?root_after_block,
+            begin_block_events = begin_events.len(),
+            end_block_events = end_events.len(),
+            "empty block {synthetic_height} committed"
+        );
+
+        // 3. Let the node start, and let CometBFT issue InitChain.
+        let mut delta = StateDelta::new(storage.latest_snapshot());
+        let committed_height = delta.get_block_height().await?;
+        ensure!(
+            committed_height == synthetic_height,
+            "block height {committed_height} after the empty block, expected {synthetic_height}"
+        );
+        delta.ready_to_start();
+        delta.put_block_height(0u64);
+        let post_upgrade_root_hash = storage.commit_in_place(delta).await?;
+        ensure!(
+            storage.latest_version() == synthetic_height,
+            "state version {} after the final commit, expected {synthetic_height}",
+            storage.latest_version()
+        );
+        tracing::info!(
+            ?post_upgrade_root_hash,
+            post_upgrade_height,
+            "post-migration root hash; CometBFT starts at initial_height {post_upgrade_height}"
+        );
+        storage.release().await;
+
+        Ok((post_upgrade_root_hash, post_upgrade_height))
     }
 
     async fn migrate_inner(&self, delta: &mut StateDelta<cnidarium::Snapshot>) -> Result<()> {
