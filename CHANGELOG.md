@@ -63,6 +63,17 @@ If the prune is interrupted, nothing is lost. Both `pd migrate prune` and
 `pd start` detect an interrupted directory swap and print the exact command to
 restore the database.
 
+#### Who should prune
+
+* **Validators**: yes. Consensus only reads the latest state version.
+* **RPC and archive nodes**: preferably not. Pruning removes every historical
+  version of the state tree, so a pruned node can only serve state proofs from
+  the prune point onwards. IBC relayers query proofs at specific recent heights
+  and explorers may query state at a given height; point them at an unpruned
+  node. Rotko keeps `penumbra.rotko.net` unpruned for this reason. If you do
+  prune an RPC node, expect relayer queries to fail for the first minutes after
+  the prune, until new versions accumulate again.
+
 #### What is not pruned, on purpose
 
 * CometBFT's block store (about 65 GB on mainnet). `pd` still tells CometBFT to

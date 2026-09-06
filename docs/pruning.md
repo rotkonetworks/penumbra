@@ -21,7 +21,7 @@ an empty list).
 
 1. **`pd migrate prune` is safe for every node and does not affect bootstrap.**
    It collapses the main JMT to a single version and leaves history substores
-   and CometBFT untouched. Run it on every validator and RPC node.
+   and CometBFT untouched. Run it on validators.
 
 2. **CometBFT block retention stays disabled in pd until state sync exists.**
    pd returns `retain_height = 0` from `Commit`, so no node can prune its
@@ -31,7 +31,12 @@ an empty list).
    floor must be computed from the chain's evidence parameters at runtime and
    pd must refuse lower values.
 
-3. **RPC operators never prune history substores.** Wallets scan compact
+3. **RPC and archive nodes stay unpruned.** Historical state-tree versions are
+   what IBC relayers (proofs at recent heights) and explorers (state at a
+   height) query. `penumbra.rotko.net` is kept fully unpruned as the archive
+   and relayer target. A node that is pruned regrows its history from the
+   prune point onward, so the gap is temporary, but an archive should not have
+   one. Independently of that, **RPC operators never prune history substores.** Wallets scan compact
    blocks from their birthday forward. Pruning them breaks user sync, which is
    worse than a validator failing to join.
 
