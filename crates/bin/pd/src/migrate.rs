@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use tracing::instrument;
 
 use migrate2::Migration as MigrationTrait;
+pub use migrate2::prune_tree::PruneOptions;
 
 use cnidarium::Storage;
 use penumbra_sdk_app::SUBSTORE_PREFIXES;
@@ -82,7 +83,7 @@ pub enum Migration {
     /// - Swap IBC client state
     IbcClientRecovery,
     /// Prune the public chain state
-    PruneState,
+    PruneState(migrate2::prune_tree::PruneOptions),
     /// No-op migration
     /// - Resets halt bit and produces new genesis without state changes
     NoOp,
@@ -120,9 +121,11 @@ impl Migration {
         // PruneState is non-consensus-breaking and safe to run anytime.
         // Skip the halt bit check to avoid opening the database twice
         // (which creates ~100KB of RocksDB LOG files per open).
-        if matches!(self, Migration::PruneState) {
-            tracing::info!("starting migration");
-            let migration = migrate2::prune_tree::JellyfishTreePruner;
+        if let Migration::PruneState(options) = self {
+            tracing::info!(?options, "starting migration");
+            let migration = migrate2::prune_tree::JellyfishTreePruner {
+                options: options.clone(),
+            };
             let (root_hash, version) = migration.migrate(&pd_home, comet_home.as_ref()).await?;
             tracing::info!(?root_hash, version, "JMT pruning complete");
             return Ok(());
@@ -232,7 +235,7 @@ impl Migration {
                 // Early return since the new framework handles genesis generation.
                 return Ok(());
             }
-            Migration::PruneState => {
+            Migration::PruneState(_) => {
                 // Handled above before Storage::load to avoid double-open
                 unreachable!()
             }

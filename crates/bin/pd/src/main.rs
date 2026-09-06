@@ -109,6 +109,20 @@ async fn main() -> anyhow::Result<()> {
             };
             let rocksdb_home = pd_home.join("rocksdb");
 
+            // An interrupted `pd migrate prune` leaves `rocksdb_old` without `rocksdb`.
+            // Opening storage here would silently create an empty database and
+            // start syncing from genesis, so refuse instead.
+            let rocksdb_old = pd_home.join("rocksdb_old");
+            anyhow::ensure!(
+                !(rocksdb_old.exists() && !rocksdb_home.exists()),
+                "found {} but no {}: a `pd migrate prune` was interrupted mid-swap. \
+                 Restore the database with `mv {} {}` before starting pd.",
+                rocksdb_old.display(),
+                rocksdb_home.display(),
+                rocksdb_old.display(),
+                rocksdb_home.display(),
+            );
+
             let storage = Storage::load(rocksdb_home, SUBSTORE_PREFIXES.to_vec())
                 .await
                 .context(
@@ -549,10 +563,16 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .context("failed to perform no-op migration")?;
                 }
-                Some(MigrateCommand::Prune) => {
+                Some(MigrateCommand::Prune {
+                    chunk_size,
+                    delete_old_db,
+                }) => {
                     tracing::info!("performing JMT pruning migration");
-                    PruneState
-                        .migrate(pd_home, comet_home, None, force)
+                    PruneState(pd::migrate::PruneOptions {
+                        chunk_size,
+                        delete_old_db,
+                    })
+                    .migrate(pd_home, comet_home, None, force)
                         .instrument(pd_migrate_span)
                         .await
                         .context("failed to perform JMT pruning")?;
