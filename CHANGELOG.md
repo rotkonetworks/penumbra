@@ -25,9 +25,19 @@ root hash and synced live mainnet blocks.
 
 #### How to prune a validator
 
-Prune validators **one at a time**. The node is offline while the prune runs:
-about an hour on NVMe for a mainnet store, longer on slower disks. Taking more
-than a third of voting power offline at once halts the chain.
+**The node is fully offline while the prune runs.** Both `pd` and CometBFT
+must be stopped; the prune needs exclusive access to the database. Expect
+about an hour on NVMe for a mainnet store, longer on slower disks. The node
+resumes at the same height afterwards and catches up from peers.
+
+**Coordinate with other validators and do not prune at the same time.** If
+more than one third of voting power is offline, the chain stops producing
+blocks. Before you start, check that no other validator is pruning and that
+the network has comfortably more than two thirds of stake online without you.
+
+**If your validator alone holds more than one third of voting power, do not
+prune at all.** Stopping it halts the chain for the duration. Wait until stake
+is spread further, or reduce your share first.
 
 1. Install the `pd` 2.0.8 binary (see below). It is a drop-in replacement.
 2. Make sure at least 35 GB is free next to the `pd` data directory.
